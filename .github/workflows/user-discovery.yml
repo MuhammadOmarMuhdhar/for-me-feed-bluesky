@@ -1,0 +1,127 @@
+name: User Discovery ETL
+
+on:
+  workflow_dispatch: # Manual triggering
+    inputs:
+      hours_back:
+        description: 'Hours to look back in logs'
+        required: false
+        default: '1'
+      dry_run:
+        description: 'Run without storing to BigQuery'
+        required: false
+        default: 'false'
+  repository_dispatch: # API trigger from Google Cloud Scheduler
+    types: [discover-users]
+
+env:
+  BLUESKY_IDENTIFIER: ${{ secrets.BLUESKY_IDENTIFIER }}
+  BLUESKY_PASSWORD: ${{ secrets.BLUESKY_PASSWORD }}
+  BIGQUERY_PROJECT_ID: ${{ secrets.BIGQUERY_PROJECT_ID }}
+  BIGQUERY_DATASET_ID: ${{ secrets.BIGQUERY_DATASET_ID }}
+  BIGQUERY_CREDENTIALS_JSON: ${{ secrets.BIGQUERY_CREDENTIALS_JSON }}
+
+jobs:
+  discover-users:
+    runs-on: ubuntu-latest
+    name: Discover New Feed Users
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create BigQuery users table if needed
+        run: |
+          python -c "
+          from client.bigQuery import Client
+          import json
+          import os
+          from google.cloud import bigquery
+          
+          # Initialize BigQuery client
+          credentials_json = json.loads(os.environ['BIGQUERY_CREDENTIALS_JSON'])
+          bq_client = Client(credentials_json, os.environ['BIGQUERY_PROJECT_ID'])
+          
+          # Create users table
+          try:
+              users_schema = [
+                  bigquery.SchemaField('user_id', 'STRING', mode='REQUIRED'),
+                  bigquery.SchemaField('handle', 'STRING'),
+                  bigquery.SchemaField('display_name', 'STRING'),
+                  bigquery.SchemaField('description', 'STRING'),
+                  bigquery.SchemaField('followers_count', 'INT64'),
+                  bigquery.SchemaField('following_count', 'INT64'),
+                  bigquery.SchemaField('posts_count', 'INT64'),
+                  bigquery.SchemaField('keywords', 'STRING', mode='REPEATED'),  # Array of keywords
+                  bigquery.SchemaField('is_active', 'BOOLEAN'),
+                  bigquery.SchemaField('discovered_via', 'STRING'),
+                  bigquery.SchemaField('first_discovered_at', 'TIMESTAMP'),
+                  bigquery.SchemaField('last_seen_at', 'TIMESTAMP'),
+                  bigquery.SchemaField('created_at', 'TIMESTAMP'),
+                  bigquery.SchemaField('updated_at', 'TIMESTAMP')
+              ]
+              
+              table_ref = bq_client.client.dataset('data').table('users')
+              table = bigquery.Table(table_ref, schema=users_schema)
+              bq_client.client.create_table(table)
+              print('Created users table')
+          except Exception as e:
+              if 'already exists' in str(e).lower():
+                  print('Users table already exists')
+              else:
+                  print(f'Error creating users table: {e}')
+          
+          print('Schema setup completed!')
+          "
+
+      - name: Run User Discovery ETL
+        run: |
+          python ETL/userDiscoveryETL.py \
+            --hours-back ${{ github.event.inputs.hours_back || '1' }} \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+
+      - name: Verify Results
+        run: |
+          python -c "
+          from client.bigQuery import Client
+          import json
+          import os
+          
+          try:
+              credentials_json = json.loads(os.environ['BIGQUERY_CREDENTIALS_JSON'])
+              bq_client = Client(credentials_json, os.environ['BIGQUERY_PROJECT_ID'])
+              
+              # Count total users
+              query = f'SELECT COUNT(*) as total_users FROM \`{bq_client.project_id}.data.users\`'
+              result = bq_client.query(query)
+              
+              if not result.empty:
+                  total_users = result.iloc[0]['total_users']
+                  print(f'Total users in database: {total_users}')
+              else:
+                  print('No users found in database')
+                  
+              # Count recent discoveries
+              query = f'''
+              SELECT COUNT(*) as recent_users 
+              FROM \`{bq_client.project_id}.data.users\`
+              WHERE first_discovered_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+              '''
+              result = bq_client.query(query)
+              
+              if not result.empty:
+                  recent_users = result.iloc[0]['recent_users']
+                  print(f'Users discovered in last 24 hours: {recent_users}')
+                  
+          except Exception as e:
+              print(f'Error checking results: {e}')
+          "

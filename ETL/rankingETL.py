@@ -35,7 +35,6 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
             last_seen_at,
             keywords
         FROM `{bq_client.project_id}.data.users`
-        WHERE is_active = TRUE
         ORDER BY last_seen_at DESC
         {limit_clause}
         """
