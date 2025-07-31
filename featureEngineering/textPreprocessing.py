@@ -120,14 +120,3 @@ def preprocess_for_bm25(text: str, remove_stops: bool = False) -> List[str]:
         tokens = remove_stopwords(tokens)
     
     return tokens
-
-
-if __name__ == "__main__":
-    # Example usage
-    sample_text = "Hello World! This is a #test post with @mentions and some punctuation..."
-    
-    print("Original text:", sample_text)
-    print("Tokens:", tokenize_text(sample_text))
-    print("Hashtags:", extract_hashtags(sample_text))
-    print("Mentions:", extract_mentions(sample_text))
-    print("BM25 preprocessing:", preprocess_for_bm25(sample_text, remove_stops=True))

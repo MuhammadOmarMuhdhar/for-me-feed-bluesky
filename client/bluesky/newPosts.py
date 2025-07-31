@@ -5,7 +5,7 @@ import websockets
 import sys
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
-from atproto import Client, models
+from atproto import Client as AtprotoClient, models
 from dateutil import parser
 from dotenv import load_dotenv
 
@@ -16,9 +16,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 load_dotenv()
 
 
-class BlueskyClient:
+class Client:
     def __init__(self, service_url: str = "https://bsky.social"):
-        self.client = Client(service_url)
+        self.client = AtprotoClient(service_url)
         self.authenticated = False
     
     def login(self, identifier: str = None, password: str = None):

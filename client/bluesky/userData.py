@@ -3,7 +3,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
-from atproto import Client, models
+from atproto import Client as AtprotoClient, models
 from dateutil import parser
 from dotenv import load_dotenv
 
@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-class BlueskyUserDataClient:
+class Client:
     def __init__(self, service_url: str = "https://bsky.social"):
-        self.client = Client(service_url)
+        self.client = AtprotoClient(service_url)
         self.authenticated = False
     
     def login(self, identifier: str = None, password: str = None):
@@ -549,20 +549,3 @@ class BlueskyUserDataClient:
         
         print(f"User data saved to {filename}")
 
-
-if __name__ == "__main__":
-    # Example usage
-    client = BlueskyUserDataClient()
-    
-    try:
-        # Login using environment variables
-        client.login()
-        
-        # Get comprehensive user data
-        user_data = client.get_comprehensive_user_data()
-        
-        # Save to file
-        client.save_user_data(user_data, "data/user_engagement/user_data.json")
-        
-    except Exception as e:
-        print(f"Error: {e}")

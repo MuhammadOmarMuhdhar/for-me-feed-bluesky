@@ -1,0 +1,58 @@
+name: Feed Ranking ETL
+
+on:
+  workflow_dispatch: # Manual triggering
+    inputs:
+      test_mode:
+        description: 'Run in test mode (limited users)'
+        required: false
+        default: 'false'
+  repository_dispatch: # API trigger from Google Cloud Scheduler
+    types: [run-etl]
+
+env:
+  BLUESKY_IDENTIFIER: ${{ secrets.BLUESKY_IDENTIFIER }}
+  BLUESKY_PASSWORD: ${{ secrets.BLUESKY_PASSWORD }}
+  BIGQUERY_PROJECT_ID: ${{ secrets.BIGQUERY_PROJECT_ID }}
+  BIGQUERY_DATASET_ID: ${{ secrets.BIGQUERY_DATASET_ID }}
+  BIGQUERY_TABLE_ID_POSTS: ${{ secrets.BIGQUERY_TABLE_ID_POSTS }}
+  BIGQUERY_CREDENTIALS_JSON: ${{ secrets.BIGQUERY_CREDENTIALS_JSON }}
+  REDIS_URL: ${{ secrets.REDIS_URL }}
+
+jobs:
+  ranking-etl:
+    runs-on: ubuntu-latest
+    name: Calculate and Cache Rankings
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Feed Ranking ETL
+        run: |
+          python ETL/rankingETL.py --test-mode ${{ github.event.inputs.test_mode || 'false' }}
+
+      - name: Verify Cache Status
+        run: |
+          python -c "
+          from client.redis import Client
+          import os
+          
+          redis_client = Client()
+          stats = redis_client.get_stats()
+          cached_users = redis_client.get_cached_users()
+          
+          print(f'Redis Stats: {stats}')
+          print(f'Cached feeds for {len(cached_users)} users')
+          if cached_users:
+              print(f'Sample users: {cached_users[:5]}')
+          "

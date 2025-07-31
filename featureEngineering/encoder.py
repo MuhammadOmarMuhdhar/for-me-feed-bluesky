@@ -1,6 +1,5 @@
 from sentence_transformers import SentenceTransformer
 from umap import UMAP
-from sklearn.decomposition import PCA
 import torch
 import numpy as np
 import pickle
@@ -18,8 +17,6 @@ def run(posts,
         umap_model_path=None,
         use_parametric=False,
         skip_embedding=False,
-        use_pca=True,
-        pca_components=50,
         save_parametric_model_path=None):
     """
     Efficiently encode Bluesky post text in batches using sentence transformers,
@@ -35,13 +32,13 @@ def run(posts,
     batch_size : int, optional
         Number of posts to process in each batch (default: 100)
     umap_components : int, optional
-        Number of dimensions for UMAP reduction (default: 2)
+        Number of dimensions for UMAP reduction (default: 32)
     random_state : int, optional
         Random seed for UMAP for reproducibility (default: 42)
     min_dist : float, optional
-        UMAP min_dist parameter controlling how tightly points are packed (default: 0.3)
+        UMAP min_dist parameter controlling how tightly points are packed (default: 0.0)
     n_neighbors : int, optional
-        UMAP n_neighbors parameter controlling local versus global structure (default: 8)
+        UMAP n_neighbors parameter controlling local versus global structure (default: 15)
     device : str, optional
         Device to run the model on ('cpu', 'cuda', 'mps', etc.)
         If None, will use CUDA if available, otherwise CPU
@@ -54,10 +51,6 @@ def run(posts,
     skip_embedding : bool, optional
         If True, skip embedding calculation and use existing 'embedding' field from posts.
         Useful when posts already contain precomputed embeddings (default: False)
-    use_pca : bool, optional
-        Whether to apply PCA before UMAP to reduce dimensionality and compress outliers (default: True)
-    pca_components : int, optional
-        Number of PCA components to use (default: 50)
     save_parametric_model_path : str, optional
         Path to save the trained Parametric UMAP model when use_parametric=True and umap_model_path=None
         Only used when creating a new parametric model (default: None)
@@ -65,7 +58,7 @@ def run(posts,
     Returns:
     --------
     list of dict
-        The input posts with 'embedding' and 'umap_embedding' fields added to each post that has text
+        The input posts with 'embedding' and UMAP embeddings as UMAP1, UMAP2, ... fields
     """
     
     if skip_embedding:
@@ -141,14 +134,7 @@ def run(posts,
             print("Warning: No valid post text found for embedding.")
             return posts
     
-    # Apply PCA before UMAP if requested
-    if len(all_embeddings) > 0 and use_pca and all_embeddings.shape[1] > pca_components:
-        print(f"Applying PCA to reduce from {all_embeddings.shape[1]} to {pca_components} dimensions...")
-        pca = PCA(n_components=pca_components, random_state=random_state)
-        all_embeddings = pca.fit_transform(all_embeddings)
-        print(f"Success: PCA explained variance ratio: {pca.explained_variance_ratio_.sum():.3f}")
-    
-    # Apply UMAP dimensionality reduction
+    # Apply UMAP dimensionality reduction directly (PCA removed for better small dataset handling)
     if len(all_embeddings) > 0:
         # Choose UMAP approach based on parameters
         if umap_model_path:
