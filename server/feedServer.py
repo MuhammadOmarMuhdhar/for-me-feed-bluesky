@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Feed Server for Bluesky AT Protocol
-Serves personalized rankings from Redis cache
-"""
-
 import os
 import sys
 import json
@@ -21,6 +15,7 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from client.redis import Client as RedisClient
+from client.bluesky.newPosts import Client as BlueskyPostsClient
 
 # Configure logging
 logging.basicConfig(
@@ -33,6 +28,7 @@ class FeedServer:
     def __init__(self):
         """Initialize feed server"""
         self.redis_client = RedisClient()
+        self.bluesky_client = None
         self.app = FastAPI()
         self.setup_routes()
         
@@ -77,6 +73,72 @@ class FeedServer:
         except Exception as e:
             logger.warning(f"Failed to log request: {e}")
 
+    def get_bluesky_client(self):
+        """Get or create authenticated Bluesky client"""
+        if self.bluesky_client is None:
+            try:
+                self.bluesky_client = BlueskyPostsClient()
+                self.bluesky_client.login()
+                logger.info("Bluesky client authenticated for trending posts")
+            except Exception as e:
+                logger.error(f"Failed to authenticate Bluesky client: {e}")
+                return None
+        return self.bluesky_client
+
+    def get_trending_posts(self) -> List[Dict]:
+        """Get trending posts with Redis caching"""
+        try:
+            # Check Redis cache first
+            cached_trending = self.redis_client.get_trending_posts()
+            if cached_trending:
+                logger.info(f"Retrieved {len(cached_trending)} trending posts from cache")
+                return cached_trending
+
+            # Cache miss - fetch from Bluesky
+            logger.info("Trending posts cache miss, fetching from Bluesky...")
+            
+            client = self.get_bluesky_client()
+            if not client:
+                logger.error("Could not get Bluesky client for trending posts")
+                return []
+
+            # Fetch trending posts (last 6 hours, top 100 posts)
+            trending_posts = client.get_top_posts_multiple_queries(
+                queries=["the", "a", "I", "you", "this", "today", "new", "just", "now", "really"],
+                target_count=100,
+                time_hours=6
+            )
+
+            if not trending_posts:
+                logger.warning("No trending posts retrieved from Bluesky")
+                return []
+
+            # Convert to feed format
+            formatted_posts = []
+            for post in trending_posts:
+                formatted_post = {
+                    "post_uri": post['uri'],
+                    "combined_score": post['engagement_score'],
+                    "like_count": post['like_count'],
+                    "repost_count": post['repost_count'],
+                    "reply_count": post['reply_count'],
+                    "created_at": post['created_at'],
+                    "author_handle": post['author']['handle'],
+                    "text": post['text'][:200],  # Truncate for cache efficiency
+                    "source": "trending"
+                }
+                formatted_posts.append(formatted_post)
+
+            # Cache for 30 minutes
+            self.redis_client.cache_trending_posts(formatted_posts, ttl=1800)
+            logger.info(f"Cached {len(formatted_posts)} trending posts for 30 minutes")
+            
+            return formatted_posts
+
+        except Exception as e:
+            logger.error(f"Error fetching trending posts: {e}")
+            return []
+
     def setup_routes(self):
         """Setup FastAPI routes"""
         
@@ -102,6 +164,15 @@ class FeedServer:
                 cached_posts = []
                 if user_did:
                     cached_posts = self.redis_client.get_user_feed(user_did) or []
+                
+                # Fallback to trending posts for new users
+                if not cached_posts:
+                    trending_posts = self.get_trending_posts()
+                    if trending_posts:
+                        cached_posts = trending_posts
+                        logger.info(f"Serving {len(trending_posts)} trending posts to new user {user_did or 'anonymous'}")
+                    else:
+                        logger.warning("No trending posts available for fallback")
                 
                 # Handle pagination
                 start_idx = 0

@@ -125,6 +125,64 @@ class Client:
             self.logger.error(f"Failed to clear feeds: {e}")
             return False
     
+    def cache_trending_posts(self, trending_posts: List[Dict], ttl: int = 1800) -> bool:
+        """
+        Cache trending posts for new users
+        
+        Args:
+            trending_posts: List of trending post dictionaries
+            ttl: Time to live in seconds (default: 30 minutes)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            key = "trending:posts"
+            
+            # Store as JSON with metadata
+            trending_data = {
+                'posts': trending_posts,
+                'updated_at': datetime.utcnow().isoformat(),
+                'count': len(trending_posts)
+            }
+            
+            json_data = json.dumps(trending_data, default=str)
+            result = self.client.set(key, json_data)
+            if result:
+                self.client.expire(key, ttl)
+            
+            self.logger.info(f"Cached {len(trending_posts)} trending posts for {ttl}s")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Failed to cache trending posts: {e}")
+            return False
+    
+    def get_trending_posts(self) -> Optional[List[Dict]]:
+        """
+        Retrieve cached trending posts
+        
+        Returns:
+            List of trending posts or None if not found/expired
+        """
+        try:
+            key = "trending:posts"
+            data = self.client.get(key)
+            
+            if not data:
+                self.logger.info("No cached trending posts found")
+                return None
+            
+            trending_data = json.loads(data)
+            posts = trending_data.get('posts', [])
+            
+            self.logger.info(f"Retrieved {len(posts)} cached trending posts")
+            return posts
+            
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve trending posts: {e}")
+            return None
+
     def get_stats(self) -> Dict:
         """Get cache statistics"""
         try:

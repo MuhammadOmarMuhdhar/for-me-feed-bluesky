@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Publish Feed Generator to AT Protocol
-Based on Bluesky's official publishFeedGen.ts script
-"""
-
 import os
 import sys
 from datetime import datetime
