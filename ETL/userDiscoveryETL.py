@@ -229,12 +229,8 @@ def main():
     
     try:
         # Initialize clients
-        if not args.dry_run:
-            credentials_json = json.loads(os.environ['BIGQUERY_CREDENTIALS_JSON'])
-            bq_client = BigQueryClient(credentials_json, os.environ['BIGQUERY_PROJECT_ID'])
-            existing_users = get_existing_users_from_bigquery(bq_client)
-        else:
-            existing_users = set()
+        credentials_json = json.loads(os.environ['BIGQUERY_CREDENTIALS_JSON'])
+        bq_client = BigQueryClient(credentials_json, os.environ['BIGQUERY_PROJECT_ID'])
         
         bluesky_client = BlueskyUserDataClient()
         bluesky_client.login()
