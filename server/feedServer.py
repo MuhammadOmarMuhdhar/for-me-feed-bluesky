@@ -3,6 +3,7 @@ import sys
 import json
 import logging
 import base64
+import threading
 from datetime import datetime
 from typing import Optional, Dict, List
 from fastapi import FastAPI, Request
@@ -225,17 +226,30 @@ class FeedServer:
                 auth_header = request.headers.get('authorization', '')
                 user_did = self.decode_user_did(auth_header)
                 
-                # Log request for user discovery
-                if user_did:
-                    self.log_request_to_bigquery(user_did, feed)
-                
-                # Get cached rankings
+                # Fast check: Look in Redis cache for user feed
                 cached_posts = []
                 if user_did:
                     cached_posts = self.redis_client.get_user_feed(user_did) or []
                 
-                # Fallback to default feed for new users
-                if not cached_posts:
+                if cached_posts:
+                    # EXISTING USER: Serve personalized feed, log async
+                    if user_did:
+                        threading.Thread(
+                            target=self.log_request_to_bigquery, 
+                            args=(user_did, feed),
+                            daemon=True
+                        ).start()
+                    logger.info(f"Serving {len(cached_posts)} personalized posts to user {user_did or 'anonymous'}")
+                else:
+                    # POTENTIALLY NEW USER: Serve default feed, log async
+                    if user_did:
+                        threading.Thread(
+                            target=self.log_request_to_bigquery, 
+                            args=(user_did, feed),
+                            daemon=True
+                        ).start()
+                    
+                    # Get default feed
                     default_posts = self.redis_client.get_default_feed()
                     if default_posts:
                         cached_posts = default_posts
