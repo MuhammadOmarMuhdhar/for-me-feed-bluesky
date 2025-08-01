@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-User Discovery ETL for Feed Request Tracking
-Detects new users from feed server logs, extracts their keywords, and stores in BigQuery
-"""
-
 import os
 import sys
 import argparse
@@ -56,71 +50,46 @@ def decode_jwt_user_did(jwt_token: str) -> Optional[str]:
         logger.error(f"Failed to decode JWT: {e}")
         return None
 
-def parse_feed_server_logs(log_file_path: str, since_timestamp: datetime) -> List[Dict]:
+def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: datetime) -> List[Dict]:
     """
-    Parse feed server logs to extract new user requests
+    Get users from BigQuery who need their profile data populated
     
     Args:
-        log_file_path: Path to feed server log file
-        since_timestamp: Only process logs after this time
+        bq_client: BigQuery client
+        since_timestamp: Only process users who made requests after this time
         
     Returns:
-        List of new user request data
+        List of user data that needs profile information
     """
-    new_users = []
-    seen_dids = set()
-    
     try:
-        # Mock log parsing - replace with actual log format
-        # Expected log format: "TIMESTAMP - GET /xrpc/app.bsky.feed.getFeedSkeleton - Authorization: Bearer JWT_TOKEN"
+        query = f"""
+        SELECT user_id, first_request_at, last_request_at, request_count
+        FROM `{bq_client.project_id}.data.users`
+        WHERE (handle = '' OR handle IS NULL)
+        AND last_request_at >= '{since_timestamp.isoformat()}'
+        AND user_id LIKE 'did:plc:%'
+        ORDER BY first_request_at DESC
+        """
         
-        if not os.path.exists(log_file_path):
-            logger.warning(f"Feed server log file not found: {log_file_path}")
-            # Return mock data for testing
-            return [
-                {
-                    'user_did': 'did:plc:test_user_1',
-                    'first_seen': datetime.now(),
-                    'request_count': 1
-                }
-            ]
+        result = bq_client.query(query)
         
-        with open(log_file_path, 'r') as f:
-            for line in f:
-                try:
-                    # Parse log line (adjust regex for your actual log format)
-                    match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*getFeedSkeleton.*Bearer\s+([^\\s]+)', line)
-                    if not match:
-                        continue
-                    
-                    timestamp_str, jwt_token = match.groups()
-                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-                    
-                    # Only process recent logs
-                    if timestamp < since_timestamp:
-                        continue
-                    
-                    # Extract user DID from JWT
-                    user_did = decode_jwt_user_did(jwt_token)
-                    if not user_did or user_did in seen_dids:
-                        continue
-                    
-                    seen_dids.add(user_did)
-                    new_users.append({
-                        'user_did': user_did,
-                        'first_seen': timestamp,
-                        'request_count': 1
-                    })
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to parse log line: {e}")
-                    continue
+        if result.empty:
+            logger.info("No users needing profile data found")
+            return []
         
-        logger.info(f"Parsed {len(new_users)} new users from feed logs")
-        return new_users
+        users_needing_data = []
+        for _, row in result.iterrows():
+            users_needing_data.append({
+                'user_did': row['user_id'],
+                'first_seen': row['first_request_at'],
+                'request_count': row['request_count']
+            })
+        
+        logger.info(f"Found {len(users_needing_data)} users needing profile data")
+        return users_needing_data
         
     except Exception as e:
-        logger.error(f"Failed to parse feed server logs: {e}")
+        logger.error(f"Failed to get users needing profile data: {e}")
         return []
 
 def get_existing_users_from_bigquery(bq_client: BigQueryClient) -> set:
@@ -214,22 +183,33 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
         logger.error(f"Failed to process user data for {user_did}: {e}")
         return None
 
-def store_user_in_bigquery(bq_client: BigQueryClient, user_data: Dict, batch_id: str) -> bool:
-    """Store processed user data in BigQuery"""
+def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, batch_id: str) -> bool:
+    """Update existing user record with profile data in BigQuery"""
     try:
-        import pandas as pd
+        # Update the existing user record with profile information
+        keywords_str = "', '".join(user_data['keywords']) if user_data['keywords'] else ""
+        keywords_array = f"['{keywords_str}']" if keywords_str else "[]"
         
-        # Convert to DataFrame
-        df = pd.DataFrame([user_data])
+        update_query = f"""
+        UPDATE `{bq_client.project_id}.data.users`
+        SET handle = '{user_data['handle']}',
+            display_name = '{user_data['display_name'].replace("'", "''")}',
+            description = '{user_data['description'].replace("'", "''")}',
+            followers_count = {user_data['followers_count']},
+            following_count = {user_data['following_count']},
+            posts_count = {user_data['posts_count']},
+            keywords = {keywords_array},
+            updated_at = '{datetime.utcnow().isoformat()}'
+        WHERE user_id = '{user_data['user_id']}'
+        """
         
-        # Store in BigQuery users table
-        bq_client.append(df, 'data', 'users', create_if_not_exists=True)
+        bq_client.query(update_query)
         
-        logger.info(f"Stored user {user_data['handle']} in BigQuery")
+        logger.info(f"Updated user profile for {user_data['handle']} in BigQuery")
         return True
         
     except Exception as e:
-        logger.error(f"Failed to store user in BigQuery: {e}")
+        logger.error(f"Failed to update user profile in BigQuery: {e}")
         return False
 
 def main():
@@ -259,25 +239,19 @@ def main():
         bluesky_client = BlueskyUserDataClient()
         bluesky_client.login()
         
-        # Parse feed server logs for new users
-        new_user_requests = parse_feed_server_logs(args.log_file, since_timestamp)
+        # Get users needing profile data from BigQuery
+        users_needing_data = get_users_needing_profile_data(bq_client, since_timestamp)
         
-        if not new_user_requests:
-            logger.info("No new users found in feed logs")
+        if not users_needing_data:
+            logger.info("No users needing profile data found")
             return
         
-        # Filter out existing users
-        truly_new_users = [
-            user for user in new_user_requests 
-            if user['user_did'] not in existing_users
-        ]
-        
-        logger.info(f"Found {len(truly_new_users)} truly new users (out of {len(new_user_requests)} log entries)")
+        logger.info(f"Found {len(users_needing_data)} users needing profile data")
         
         success_count = 0
         error_count = 0
         
-        for user_request in truly_new_users:
+        for user_request in users_needing_data:
             user_did = user_request['user_did']
             
             try:
@@ -297,16 +271,16 @@ def main():
                     error_count += 1
                     continue
                 
-                # Store in BigQuery
+                # Update user profile in BigQuery
                 if not args.dry_run:
-                    if store_user_in_bigquery(bq_client, processed_user, batch_id):
+                    if update_user_profile_in_bigquery(bq_client, processed_user, batch_id):
                         success_count += 1
-                        logger.info(f"Successfully onboarded user {processed_user['handle']}")
+                        logger.info(f"Successfully updated user profile for {processed_user['handle']}")
                     else:
                         error_count += 1
-                        logger.error(f"Failed to store user {processed_user['handle']}")
+                        logger.error(f"Failed to update user profile for {processed_user['handle']}")
                 else:
-                    logger.info(f"DRY RUN: Would store user {processed_user['handle']} with {len(processed_user['keywords'])} keywords")
+                    logger.info(f"DRY RUN: Would update user {processed_user['handle']} with {len(processed_user['keywords'])} keywords")
                     success_count += 1
                 
             except Exception as e:

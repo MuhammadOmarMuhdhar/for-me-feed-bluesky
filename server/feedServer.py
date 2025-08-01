@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from client.redis import Client as RedisClient
 from client.bluesky.newPosts import Client as BlueskyPostsClient
+from client.bigQuery import Client as BigQueryClient
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +30,7 @@ class FeedServer:
         """Initialize feed server"""
         self.redis_client = RedisClient()
         self.bluesky_client = None
+        self.bigquery_client = None
         self.app = FastAPI()
         self.setup_routes()
         
@@ -56,22 +58,86 @@ class FeedServer:
             logger.warning(f"Failed to decode JWT: {e}")
             return None
 
-    def log_request(self, user_did: str, feed_uri: str):
-        """Log feed request for user discovery ETL"""
+    def get_bigquery_client(self):
+        """Get or create BigQuery client"""
+        if self.bigquery_client is None:
+            try:
+                import json
+                credentials_json = json.loads(os.environ['BIGQUERY_CREDENTIALS_JSON'])
+                project_id = os.environ['BIGQUERY_PROJECT_ID']
+                self.bigquery_client = BigQueryClient(credentials_json, project_id)
+                logger.info("BigQuery client initialized for request logging")
+            except Exception as e:
+                logger.error(f"Failed to initialize BigQuery client: {e}")
+                return None
+        return self.bigquery_client
+
+    def log_request_to_bigquery(self, user_did: str, feed_uri: str):
+        """Log feed request directly to BigQuery for user discovery"""
         try:
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            log_entry = f"{timestamp} - GET /xrpc/app.bsky.feed.getFeedSkeleton - Feed: {feed_uri} - User: {user_did}"
+            bq_client = self.get_bigquery_client()
+            if not bq_client:
+                logger.warning("BigQuery client not available, skipping request logging")
+                return
+
+            import pandas as pd
             
-            log_file = os.getenv('FEED_LOG_FILE', '/tmp/feed-server.log')
-            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            # Check if user already exists
+            existing_user_query = f"""
+            SELECT user_id, request_count, last_request_at
+            FROM `{bq_client.project_id}.data.users` 
+            WHERE user_id = '{user_did}'
+            LIMIT 1
+            """
             
-            with open(log_file, 'a') as f:
-                f.write(log_entry + '\n')
+            existing_result = bq_client.query(existing_user_query)
+            current_time = datetime.utcnow()
+            
+            if not existing_result.empty:
+                # Update existing user
+                current_count = existing_result.iloc[0]['request_count'] or 0
+                new_count = current_count + 1
                 
-            logger.info(f"Logged request for user: {user_did}")
-            
+                update_query = f"""
+                UPDATE `{bq_client.project_id}.data.users`
+                SET last_request_at = '{current_time.isoformat()}',
+                    request_count = {new_count},
+                    updated_at = '{current_time.isoformat()}'
+                WHERE user_id = '{user_did}'
+                """
+                
+                bq_client.query(update_query)
+                logger.info(f"Updated request count for existing user {user_did}: {new_count}")
+                
+            else:
+                # Create new user record with minimal data
+                user_data = [{
+                    'user_id': user_did,
+                    'handle': '',  # Will be populated by user discovery ETL
+                    'display_name': '',
+                    'description': '',
+                    'followers_count': 0,
+                    'following_count': 0,
+                    'posts_count': 0,
+                    'keywords': [],
+                    'is_active': True,
+                    'discovered_via': 'feed_request',
+                    'first_discovered_at': current_time,
+                    'last_seen_at': current_time,
+                    'first_request_at': current_time,
+                    'last_request_at': current_time,
+                    'request_count': 1,
+                    'created_at': current_time,
+                    'updated_at': current_time
+                }]
+                
+                df = pd.DataFrame(user_data)
+                bq_client.append(df, 'data', 'users', create_if_not_exists=True)
+                logger.info(f"Created new user record for {user_did}")
+                
         except Exception as e:
-            logger.warning(f"Failed to log request: {e}")
+            logger.error(f"Failed to log request to BigQuery: {e}")
+            # Don't fail the request if logging fails
 
     def get_bluesky_client(self):
         """Get or create authenticated Bluesky client"""
@@ -158,7 +224,7 @@ class FeedServer:
                 
                 # Log request for user discovery
                 if user_did:
-                    self.log_request(user_did, feed)
+                    self.log_request_to_bigquery(user_did, feed)
                 
                 # Get cached rankings
                 cached_posts = []
