@@ -171,13 +171,13 @@ def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, 
     """Update existing user record with profile data in BigQuery"""
     try:
         # Update the existing user record with profile information
-        keywords_str = "', '".join(user_data['keywords']) if user_data['keywords'] else ""
-        keywords_array = f"['{keywords_str}']" if keywords_str else "[]"
+        import json
+        keywords_json = json.dumps(user_data['keywords']) if user_data['keywords'] else '[]'
         
         update_query = f"""
         UPDATE `{bq_client.project_id}.data.users`
         SET handle = '{user_data['handle']}',
-            keywords = {keywords_array},
+            keywords = '{keywords_json}',
             updated_at = '{datetime.utcnow().isoformat()}'
         WHERE user_id = '{user_data['user_id']}'
         """

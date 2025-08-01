@@ -33,7 +33,7 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
             handle,
             keywords
         FROM `{bq_client.project_id}.data.users`
-        WHERE last_request_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+        WHERE last_request_at >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 30 DAY)
         ORDER BY last_request_at DESC
         {limit_clause}
         """
@@ -47,24 +47,33 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
     except Exception as e:
         logger.warning(f"Could not get users from BigQuery: {e}")
 
-def get_user_keywords_as_terms(user_keywords: List) -> List[str]:
+def get_user_keywords_as_terms(user_keywords) -> List[str]:
     """Convert stored keywords to term list for BM25"""
     try:
+        import json
         terms = []
         
-        # Handle different keyword formats from BigQuery
-        if isinstance(user_keywords, list):
-            for kw in user_keywords:
-                if isinstance(kw, dict) and 'keyword' in kw:
-                    # BigQuery STRUCT format: {'keyword': 'startup', 'score': 0.8}
-                    keyword = kw['keyword']
-                    score = kw.get('score', 1.0)
-                    # Add keyword multiple times based on score (weight)
-                    weight = max(1, int(score * 5))  # Convert score to repeat count
-                    terms.extend([keyword] * weight)
-                elif isinstance(kw, str):
-                    # Simple string format
-                    terms.append(kw)
+        # Handle JSON string from BigQuery
+        if isinstance(user_keywords, str):
+            keywords_list = json.loads(user_keywords)
+        elif isinstance(user_keywords, list):
+            keywords_list = user_keywords
+        else:
+            logger.warning(f"Unexpected keywords format: {type(user_keywords)}")
+            return []
+        
+        # Process keywords list
+        for kw in keywords_list:
+            if isinstance(kw, dict) and 'keyword' in kw:
+                # BigQuery STRUCT format: {'keyword': 'startup', 'score': 0.8}
+                keyword = kw['keyword']
+                score = kw.get('score', 1.0)
+                # Add keyword multiple times based on score (weight)
+                weight = max(1, int(score * 5))  # Convert score to repeat count
+                terms.extend([keyword] * weight)
+            elif isinstance(kw, str):
+                # Simple string format
+                terms.append(kw)
         
         logger.info(f"Converted {len(set(terms))} unique keywords to {len(terms)} weighted terms")
         return terms
