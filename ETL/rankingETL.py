@@ -46,6 +46,7 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
         
     except Exception as e:
         logger.warning(f"Could not get users from BigQuery: {e}")
+        return []
 
 def get_user_keywords_as_terms(user_keywords) -> List[str]:
     """Convert stored keywords to term list for BM25"""
@@ -280,7 +281,7 @@ def main():
                 logger.info(f"Processing user: {user_handle}")
                 
                 # Step 1: Get stored keywords and convert to terms
-                user_keywords = user.get('keywords', [])
+                user_keywords = user.get('keywords')  # Don't default to []
                 user_terms = get_user_keywords_as_terms(user_keywords)
                 
                 if not user_terms:
