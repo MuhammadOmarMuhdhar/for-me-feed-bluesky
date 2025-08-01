@@ -12,3 +12,4 @@ fastapi==0.104.1
 uvicorn==0.24.0
 pandas==2.1.4
 google-cloud-bigquery==3.13.0
+db-dtypes==1.2.0

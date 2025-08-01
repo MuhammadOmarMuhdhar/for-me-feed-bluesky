@@ -257,13 +257,12 @@ def main():
         users = get_users_with_keywords_from_bigquery(bq_client, test_mode)
         
         if not users:
-            logger.error("No users found to process")
-            return
-        
-        logger.info(f"Processing {len(users)} users")
-        
-        success_count = 0
-        error_count = 0
+            logger.warning("No users found to process, but will still update default feed")
+            success_count, error_count = 0, 0
+        else:
+            logger.info(f"Processing {len(users)} users")
+            success_count = 0
+            error_count = 0
         
         for user in users:
             user_handle = user.get('handle', '')
