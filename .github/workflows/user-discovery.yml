@@ -66,9 +66,6 @@ jobs:
                   bigquery.SchemaField('discovered_via', 'STRING'),
                   bigquery.SchemaField('first_discovered_at', 'TIMESTAMP'),
                   bigquery.SchemaField('last_seen_at', 'TIMESTAMP'),
-                  bigquery.SchemaField('first_request_at', 'TIMESTAMP'),
-                  bigquery.SchemaField('last_request_at', 'TIMESTAMP'),
-                  bigquery.SchemaField('request_count', 'INT64'),
                   bigquery.SchemaField('created_at', 'TIMESTAMP'),
                   bigquery.SchemaField('updated_at', 'TIMESTAMP')
               ]

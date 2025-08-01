@@ -509,6 +509,12 @@ class Client:
             if np.isnan(value) or np.isinf(value):
                 return None
             return float(value)
+
+        # Handle standard Python integers and floats
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return value
         
         # Handle numpy arrays - convert to string representation
         if isinstance(value, np.ndarray):
