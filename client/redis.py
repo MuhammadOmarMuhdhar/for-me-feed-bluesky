@@ -241,6 +241,23 @@ class Client:
             self.logger.error(f"Failed to retrieve default feed: {e}")
             return None
 
+    def set_value(self, key: str, value: str, ttl: int = 3600) -> bool:
+        """Set a simple string value with TTL"""
+        try:
+            self.client.setex(key, ttl, value)
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to set value for key {key}: {e}")
+            return False
+    
+    def get_value(self, key: str) -> Optional[str]:
+        """Get a simple string value"""
+        try:
+            return self.client.get(key)
+        except Exception as e:
+            self.logger.error(f"Failed to get value for key {key}: {e}")
+            return None
+
     def get_stats(self) -> Dict:
         """Get cache statistics"""
         try:

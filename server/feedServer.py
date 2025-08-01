@@ -263,13 +263,31 @@ class FeedServer:
                         else:
                             logger.warning("No default or trending posts available for fallback")
                 
-                # Handle pagination
-                start_idx = 0
-                if cursor:
+                # Handle pagination with sequential scroll simulation
+                if not cursor:  # First request (refresh)
+                    # Get last scroll position and advance sequentially
+                    last_scroll = self.redis_client.get_value(f"scroll_start:{user_did}") or "0"
                     try:
-                        start_idx = int(cursor)
+                        last_position = int(last_scroll)
                     except:
-                        start_idx = 0
+                        last_position = 0
+                    
+                    # Advance by 20 posts each refresh, stay within top third
+                    max_scroll = min(100, len(cached_posts) // 3) if cached_posts else 0
+                    simulated_scroll = (last_position + 20) % max_scroll if max_scroll > 0 else 0
+                    start_idx = simulated_scroll
+                    
+                    # Store new position for this session
+                    self.redis_client.set_value(f"scroll_start:{user_did}", str(simulated_scroll), ttl=60)  # 1min
+                    logger.info(f"Simulated scroll to position {simulated_scroll} for user {user_did or 'anonymous'}")
+                else:
+                    # Normal pagination from stored start point
+                    scroll_start_str = self.redis_client.get_value(f"scroll_start:{user_did}") or "0"
+                    try:
+                        scroll_start = int(scroll_start_str)
+                        start_idx = scroll_start + int(cursor)
+                    except:
+                        start_idx = int(cursor) if cursor else 0
                 
                 # Prepare response
                 end_idx = start_idx + limit
