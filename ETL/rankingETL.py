@@ -97,7 +97,7 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 user_client = UserDataClient()
                 user_client.login()
                 # Get following (first 100 should be enough for network effects)
-                following_data = user_client.get_user_following(user_did, limit=100)
+                following_data = user_client.get_user_follows(user_did, limit=100)
                 following_list = [f['did'] for f in following_data] if following_data else []
                 logger.info(f"Retrieved {len(following_list)} following accounts for user {user_did}")
                 
