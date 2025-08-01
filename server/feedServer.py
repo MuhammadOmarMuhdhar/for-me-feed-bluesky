@@ -231,14 +231,20 @@ class FeedServer:
                 if user_did:
                     cached_posts = self.redis_client.get_user_feed(user_did) or []
                 
-                # Fallback to trending posts for new users
+                # Fallback to default feed for new users
                 if not cached_posts:
-                    trending_posts = self.get_trending_posts()
-                    if trending_posts:
-                        cached_posts = trending_posts
-                        logger.info(f"Serving {len(trending_posts)} trending posts to new user {user_did or 'anonymous'}")
+                    default_posts = self.redis_client.get_default_feed()
+                    if default_posts:
+                        cached_posts = default_posts
+                        logger.info(f"Serving {len(default_posts)} default posts to new user {user_did or 'anonymous'}")
                     else:
-                        logger.warning("No trending posts available for fallback")
+                        # Last resort - fetch trending posts
+                        trending_posts = self.get_trending_posts()
+                        if trending_posts:
+                            cached_posts = trending_posts
+                            logger.info(f"Serving {len(trending_posts)} trending posts to new user {user_did or 'anonymous'}")
+                        else:
+                            logger.warning("No default or trending posts available for fallback")
                 
                 # Handle pagination
                 start_idx = 0

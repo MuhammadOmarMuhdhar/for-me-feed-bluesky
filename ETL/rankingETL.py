@@ -179,6 +179,60 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
         logger.error(f"Failed to cache rankings for {user_id}: {e}")
         return False
 
+def update_default_feed_if_needed(redis_client: RedisClient):
+    """Update default feed if it's expired or missing (once daily)"""
+    try:
+        # Check if default feed exists and is fresh
+        existing_default = redis_client.get_default_feed()
+        if existing_default:
+            logger.info("Default feed already cached and fresh, skipping update")
+            return
+        
+        logger.info("Default feed expired or missing, generating new default feed...")
+        
+        # Generate default feed with popular posts from last 24 hours
+        bluesky_client = BlueskyClient()
+        bluesky_client.login()
+        
+        # Get popular posts using multiple search queries
+        popular_posts = bluesky_client.get_top_posts_multiple_queries(
+            queries=["the", "a", "I", "you", "this", "today", "new", "just", "really", "good"],
+            target_count=100,
+            time_hours=24  # Last 24 hours
+        )
+        
+        if not popular_posts:
+            logger.warning("No popular posts found for default feed")
+            return
+        
+        # Convert to feed format (same as personalized feeds)
+        formatted_posts = []
+        for post in popular_posts:
+            formatted_post = {
+                "post_uri": post['uri'],
+                "combined_score": post['engagement_score'],
+                "like_count": post['like_count'],
+                "repost_count": post['repost_count'],
+                "reply_count": post['reply_count'],
+                "created_at": post['created_at'],
+                "author_handle": post['author']['handle'],
+                "text": post['text'][:200],  # Truncate for cache efficiency
+                "source": "default_daily"
+            }
+            formatted_posts.append(formatted_post)
+        
+        # Cache for 24 hours
+        success = redis_client.set_default_feed(formatted_posts, ttl=86400)
+        
+        if success:
+            logger.info(f"Successfully updated default feed with {len(formatted_posts)} posts")
+        else:
+            logger.error("Failed to cache default feed")
+            
+    except Exception as e:
+        logger.error(f"Error updating default feed: {e}")
+        raise
+
 # Keyword extraction removed - keywords are now pre-stored in BigQuery
 # This will be handled by the separate user discovery process
 
@@ -254,6 +308,12 @@ def main():
                 error_count += 1
                 logger.error(f"Error processing {user_handle}: {e}")
                 continue
+        
+        # Update default feed for new users (once daily)
+        try:
+            update_default_feed_if_needed(redis_client)
+        except Exception as e:
+            logger.error(f"Failed to update default feed: {e}")
         
         # Final summary
         logger.info(f"ETL Complete! Success: {success_count}, Errors: {error_count}")

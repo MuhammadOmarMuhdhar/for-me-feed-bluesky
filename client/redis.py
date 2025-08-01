@@ -183,6 +183,64 @@ class Client:
             self.logger.error(f"Failed to retrieve trending posts: {e}")
             return None
 
+    def set_default_feed(self, default_posts: List[Dict], ttl: int = 86400) -> bool:
+        """
+        Store default feed for new users
+        
+        Args:
+            default_posts: List of popular post dictionaries
+            ttl: Time to live in seconds (default: 24 hours)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            key = "default:feed"
+            
+            # Store as JSON with metadata
+            feed_data = {
+                'posts': default_posts,
+                'updated_at': datetime.utcnow().isoformat(),
+                'count': len(default_posts)
+            }
+            
+            json_data = json.dumps(feed_data, default=str)
+            result = self.client.set(key, json_data)
+            if result:
+                self.client.expire(key, ttl)
+            
+            self.logger.info(f"Cached {len(default_posts)} default posts for {ttl}s")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Failed to cache default feed: {e}")
+            return False
+    
+    def get_default_feed(self) -> Optional[List[Dict]]:
+        """
+        Retrieve cached default feed
+        
+        Returns:
+            List of default posts or None if not found/expired
+        """
+        try:
+            key = "default:feed"
+            data = self.client.get(key)
+            
+            if not data:
+                self.logger.info("No cached default feed found")
+                return None
+            
+            feed_data = json.loads(data)
+            posts = feed_data.get('posts', [])
+            
+            self.logger.info(f"Retrieved {len(posts)} cached default posts")
+            return posts
+            
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve default feed: {e}")
+            return None
+
     def get_stats(self) -> Dict:
         """Get cache statistics"""
         try:
