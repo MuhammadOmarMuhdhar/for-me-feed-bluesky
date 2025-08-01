@@ -200,6 +200,63 @@ def calculate_rankings(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
         logger.error(f"Failed to calculate rankings: {e}")
         return []
 
+def boost_network_posts(ranked_posts: List[Dict], user_did: str) -> List[Dict]:
+    """
+    Boost posts from user's network to ensure visibility throughout the feed
+    
+    Args:
+        ranked_posts: List of posts with BM25 scores
+        user_did: User's DID to get their following list
+        
+    Returns:
+        Re-ranked posts with network posts boosted
+    """
+    try:
+        # Get user's following list for boost identification
+        following_dids = set()
+        try:
+            from client.bluesky.userData import Client as UserDataClient
+            user_client = UserDataClient()
+            user_client.login()
+            following_data = user_client.get_user_follows(user_did, limit=100)
+            following_dids = {f.get('did', '') for f in following_data if isinstance(f, dict)}
+            logger.info(f"Retrieved {len(following_dids)} following DIDs for network boost")
+        except Exception as e:
+            logger.warning(f"Could not get following list for network boost: {e}")
+            return ranked_posts
+        
+        if not following_dids:
+            return ranked_posts
+        
+        network_boosted = 0
+        boost_factor = 2.5  # Strong boost to ensure network visibility
+        
+        for post in ranked_posts:
+            author_did = post.get('author', {}).get('did', '')
+            if author_did in following_dids:
+                # Apply strong boost to network posts
+                original_score = post.get('bm25_score', 0)
+                post['bm25_score'] = original_score * boost_factor
+                post['network_boosted'] = True
+                network_boosted += 1
+            else:
+                post['network_boosted'] = False
+        
+        # Re-sort after boosting
+        ranked_posts.sort(key=lambda x: x.get('bm25_score', 0), reverse=True)
+        
+        logger.info(f"Network boost applied: {network_boosted} posts boosted by {boost_factor}x")
+        
+        # Log distribution in top positions
+        network_in_top_50 = sum(1 for post in ranked_posts[:50] if post.get('network_boosted', False))
+        logger.info(f"Network representation in top 50: {network_in_top_50} posts ({network_in_top_50/50*100:.1f}%)")
+        
+        return ranked_posts
+        
+    except Exception as e:
+        logger.error(f"Failed to boost network posts: {e}")
+        return ranked_posts
+
 def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: List[Dict]) -> bool:
     """Cache minimal feed data for a user with re-ranking support"""
     try:
@@ -370,6 +427,10 @@ def main():
                 if not ranked_posts:
                     logger.warning(f"No rankings calculated for {user_handle}, skipping")
                     continue
+                
+                # Step 3.5: Boost network posts to ensure visibility
+                ranked_posts = boost_network_posts(ranked_posts, user_id)
+                logger.info(f"Applied network visibility boost for user {user_handle}")
                 
                 # Step 4: Cache results
                 cache_success = cache_user_rankings(redis_client, user_id, ranked_posts)
