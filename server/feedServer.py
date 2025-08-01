@@ -285,11 +285,21 @@ class FeedServer:
                 end_idx = start_idx + limit
                 posts_slice = cached_posts[start_idx:end_idx]
                 
-                feed_items = [
-                    {"post": post["post_uri"]}
-                    for post in posts_slice
-                    if post.get("post_uri")
-                ]
+                feed_items = []
+                for post in posts_slice:
+                    if not post.get("post_uri"):
+                        continue
+                        
+                    feed_item = {"post": post["post_uri"]}
+                    
+                    # Add repost information if this is a repost
+                    if post.get('post_type') == 'repost' and post.get('followed_user'):
+                        feed_item["reason"] = {
+                            "type": "repost",
+                            "by": post.get('followed_user')
+                        }
+                    
+                    feed_items.append(feed_item)
                 
                 # Mark served posts as consumed to prevent future duplicates
                 if user_did and posts_slice:
