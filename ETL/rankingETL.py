@@ -83,13 +83,27 @@ def get_user_keywords_as_terms(user_keywords) -> List[str]:
         logger.error(f"Failed to process user keywords: {e}")
         return []
 
-def collect_posts_to_rank(user_keywords: List[str], following_list: List = None) -> List[Dict]:
-    """Collect posts to rank using current system"""
+def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> List[Dict]:
+    """Collect posts to rank using hybrid system with following network"""
     try:
         posts_client = BlueskyClient()
         posts_client.login()
         
-        # Use keyword-based post collection (no user_data needed)
+        # Get user's following list for network effects
+        following_list = []
+        if user_did:
+            try:
+                from client.bluesky.userData import Client as UserDataClient
+                user_client = UserDataClient()
+                user_client.login()
+                # Get following (first 100 should be enough for network effects)
+                following_data = user_client.get_user_following(user_did, limit=100)
+                following_list = [f['did'] for f in following_data] if following_data else []
+                logger.info(f"Retrieved {len(following_list)} following accounts for user")
+            except Exception as e:
+                logger.warning(f"Could not get following list for {user_did}: {e}")
+                following_list = []
+        
         # Create mock user_data structure for compatibility
         mock_user_data = {
             'posts': [{'text': ' '.join(user_keywords[:10])}],  # Use keywords as mock content
@@ -100,10 +114,10 @@ def collect_posts_to_rank(user_keywords: List[str], following_list: List = None)
         
         new_posts = posts_client.get_posts_hybrid(
             user_data=mock_user_data,
-            following_list=following_list or [],
+            following_list=following_list,  # Now populated with real following!
             target_count=1000, 
             time_hours=0.15,
-            following_ratio=0.6,
+            following_ratio=0.6,  # Will actually work now!
             keyword_ratio=0.4,
             keyword_extraction_method="advanced",
             include_reposts=True,
@@ -288,8 +302,8 @@ def main():
                     logger.warning(f"No keywords found for {user_handle}, skipping")
                     continue
                 
-                # Step 2: Collect posts to rank (using keywords for targeting)
-                posts_to_rank = collect_posts_to_rank(user_terms)
+                # Step 2: Collect posts to rank (using keywords + following network)
+                posts_to_rank = collect_posts_to_rank(user_terms, user_id)
                 
                 if not posts_to_rank:
                     logger.warning(f"No posts to rank for {user_handle}, skipping")
