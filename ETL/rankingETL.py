@@ -31,11 +31,10 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
         SELECT 
             user_id,
             handle,
-            display_name,
-            last_seen_at,
             keywords
         FROM `{bq_client.project_id}.data.users`
-        ORDER BY last_seen_at DESC
+        WHERE last_request_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+        ORDER BY last_request_at DESC
         {limit_clause}
         """
         

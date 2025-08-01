@@ -63,12 +63,12 @@ def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: d
     """
     try:
         query = f"""
-        SELECT user_id, first_request_at, last_request_at, request_count
+        SELECT user_id, last_request_at, request_count
         FROM `{bq_client.project_id}.data.users`
         WHERE (handle = '' OR handle IS NULL)
         AND last_request_at >= '{since_timestamp.isoformat()}'
         AND user_id LIKE 'did:plc:%'
-        ORDER BY first_request_at DESC
+        ORDER BY last_request_at DESC
         """
         
         result = bq_client.query(query)
@@ -81,7 +81,6 @@ def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: d
         for _, row in result.iterrows():
             users_needing_data.append({
                 'user_did': row['user_id'],
-                'first_seen': row['first_request_at'],
                 'request_count': row['request_count']
             })
         
@@ -119,12 +118,7 @@ def get_user_profile_from_did(client: BlueskyUserDataClient, user_did: str) -> O
         
         return {
             'did': profile.did,
-            'handle': profile.handle,
-            'display_name': profile.display_name or '',
-            'description': profile.description or '',
-            'followers_count': profile.followers_count or 0,
-            'following_count': profile.following_count or 0,
-            'posts_count': profile.posts_count or 0
+            'handle': profile.handle or ''
         }
         
     except Exception as e:
@@ -162,17 +156,7 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
         processed_user = {
             'user_id': user_did,
             'handle': user_profile.get('handle', ''),
-            'display_name': user_profile.get('display_name', ''),
-            'description': user_profile.get('description', ''),
-            'followers_count': user_profile.get('followers_count', 0),
-            'following_count': user_profile.get('following_count', 0),
-            'posts_count': user_profile.get('posts_count', 0),
             'keywords': keywords,  # Store as JSON array
-            'is_active': True,
-            'discovered_via': 'feed_request',
-            'first_discovered_at': datetime.utcnow(),
-            'last_seen_at': datetime.utcnow(),
-            'created_at': datetime.utcnow(),
             'updated_at': datetime.utcnow()
         }
         
@@ -193,11 +177,6 @@ def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, 
         update_query = f"""
         UPDATE `{bq_client.project_id}.data.users`
         SET handle = '{user_data['handle']}',
-            display_name = '{user_data['display_name'].replace("'", "''")}',
-            description = '{user_data['description'].replace("'", "''")}',
-            followers_count = {user_data['followers_count']},
-            following_count = {user_data['following_count']},
-            posts_count = {user_data['posts_count']},
             keywords = {keywords_array},
             updated_at = '{datetime.utcnow().isoformat()}'
         WHERE user_id = '{user_data['user_id']}'

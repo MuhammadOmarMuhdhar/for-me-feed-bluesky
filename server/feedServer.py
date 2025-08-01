@@ -114,17 +114,7 @@ class FeedServer:
                 user_data = [{
                     'user_id': user_did,
                     'handle': '',  # Will be populated by user discovery ETL
-                    'display_name': '',
-                    'description': '',
-                    'followers_count': 0,
-                    'following_count': 0,
-                    'posts_count': 0,
                     'keywords': [],
-                    'is_active': True,
-                    'discovered_via': 'feed_request',
-                    'first_discovered_at': current_time,
-                    'last_seen_at': current_time,
-                    'first_request_at': current_time,
                     'last_request_at': current_time,
                     'request_count': 1,
                     'created_at': current_time,
