@@ -98,12 +98,13 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 user_client.login()
                 # Get following (first 100 should be enough for network effects)
                 following_data = user_client.get_user_follows(user_did, limit=100)
-                following_list = [f['did'] for f in following_data] if following_data else []
+                following_list = following_data if following_data else []  # Keep full objects
                 logger.info(f"Retrieved {len(following_list)} following accounts for user {user_did}")
                 
                 # Debug: Log first few following accounts
                 if following_list:
-                    logger.info(f"Sample following DIDs: {following_list[:3]}...")
+                    sample_dids = [f.get('did', 'unknown') for f in following_list[:3]]
+                    logger.info(f"Sample following DIDs: {sample_dids}...")
                 else:
                     logger.warning(f"No following accounts found for user {user_did}")
                     
@@ -133,26 +134,50 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
             repost_weight=0.5
         )
         
+        # Debug: Check what we got back
+        logger.info(f"get_posts_hybrid returned {len(new_posts) if new_posts else 0} items")
+        if new_posts:
+            logger.info(f"First post type: {type(new_posts[0])}")
+            if len(new_posts) > 0 and isinstance(new_posts[0], dict):
+                logger.info(f"First post keys: {list(new_posts[0].keys())}")
+            elif len(new_posts) > 0:
+                logger.info(f"First post content: {new_posts[0][:100] if isinstance(new_posts[0], str) else new_posts[0]}")
+        
         # Debug: Analyze post sources
         if new_posts:
             following_posts = 0
             keyword_posts = 0
             
-            for post in new_posts:
-                author_did = post.get('author', {}).get('did', '')
-                if author_did in following_list:
-                    following_posts += 1
-                else:
-                    keyword_posts += 1
+            # Create set of following DIDs for fast lookup
+            following_dids = {f.get('did', '') for f in following_list if isinstance(f, dict)}
+            
+            for i, post in enumerate(new_posts):
+                try:
+                    # Ensure post is a dictionary
+                    if not isinstance(post, dict):
+                        logger.warning(f"Post {i} is not a dictionary: {type(post)} - {post}")
+                        continue
+                        
+                    author_did = post.get('author', {}).get('did', '')
+                    if author_did in following_dids:
+                        following_posts += 1
+                    else:
+                        keyword_posts += 1
+                except Exception as e:
+                    logger.error(f"Error processing post {i}: {e}")
+                    continue
             
             logger.info(f"Post source breakdown: {following_posts} from network, {keyword_posts} from keywords")
-            logger.info(f"Network effectiveness: {following_posts/len(new_posts)*100:.1f}% from following")
+            if len(new_posts) > 0:
+                logger.info(f"Network effectiveness: {following_posts/len(new_posts)*100:.1f}% from following")
         
         logger.info(f"Collected {len(new_posts)} posts to rank")
         return new_posts
         
     except Exception as e:
+        import traceback
         logger.error(f"Failed to collect posts: {e}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return []
 
 def calculate_rankings(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
