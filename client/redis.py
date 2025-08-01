@@ -258,6 +258,93 @@ class Client:
             self.logger.error(f"Failed to get value for key {key}: {e}")
             return None
 
+    def mark_posts_consumed(self, user_id: str, post_uris: List[str], ttl: int = 259200) -> bool:
+        """
+        Mark posts as consumed by a user with memory-optimized hashing (3 day TTL)
+        
+        Args:
+            user_id: User identifier
+            post_uris: List of post URIs that were served to user
+            ttl: Time to live in seconds (default: 3 days)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not post_uris:
+                return True
+                
+            import hashlib
+            key = f"consumed:{user_id}"
+            
+            # Use Redis set to store hashed post URIs (memory efficient)
+            pipeline = self.client.pipeline()
+            for uri in post_uris:
+                # Hash URI to save memory: 85 bytes -> 12 bytes
+                uri_hash = hashlib.md5(uri.encode()).hexdigest()[:12]
+                pipeline.sadd(key, uri_hash)
+            pipeline.expire(key, ttl)
+            pipeline.execute()
+            
+            self.logger.debug(f"Marked {len(post_uris)} posts as consumed for user {user_id}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to mark posts consumed for user {user_id}: {e}")
+            return False
+    
+    def get_consumed_posts(self, user_id: str) -> set:
+        """
+        Get set of consumed post URI hashes for a user
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Set of consumed post URI hashes
+        """
+        try:
+            key = f"consumed:{user_id}"
+            consumed = self.client.smembers(key)
+            return consumed if consumed else set()
+        except Exception as e:
+            self.logger.error(f"Failed to get consumed posts for user {user_id}: {e}")
+            return set()
+    
+    def filter_unconsumed_posts(self, user_id: str, posts: List[Dict]) -> List[Dict]:
+        """
+        Filter out already consumed posts for a user using URI hashing
+        
+        Args:
+            user_id: User identifier
+            posts: List of post dictionaries with 'uri' key
+            
+        Returns:
+            List of unconsumed posts
+        """
+        try:
+            consumed_hashes = self.get_consumed_posts(user_id)
+            
+            if not consumed_hashes:
+                return posts
+            
+            import hashlib
+            unconsumed = []
+            for post in posts:
+                uri = post.get('uri', '')
+                if uri:
+                    uri_hash = hashlib.md5(uri.encode()).hexdigest()[:12]
+                    if uri_hash not in consumed_hashes:
+                        unconsumed.append(post)
+            
+            consumed_count = len(posts) - len(unconsumed)
+            if consumed_count > 0:
+                self.logger.info(f"Filtered out {consumed_count} already consumed posts for user {user_id}")
+            
+            return unconsumed
+        except Exception as e:
+            self.logger.error(f"Failed to filter consumed posts for user {user_id}: {e}")
+            return posts
+
     def get_stats(self) -> Dict:
         """Get cache statistics"""
         try:

@@ -263,31 +263,23 @@ class FeedServer:
                         else:
                             logger.warning("No default or trending posts available for fallback")
                 
-                # Handle pagination with sequential scroll simulation
-                if not cursor:  # First request (refresh)
-                    # Get last scroll position and advance sequentially
-                    last_scroll = self.redis_client.get_value(f"scroll_start:{user_did}") or "0"
-                    try:
-                        last_position = int(last_scroll)
-                    except:
-                        last_position = 0
+                # Filter out already consumed posts to prevent duplicates
+                if user_did and cached_posts:
+                    original_count = len(cached_posts)
+                    cached_posts = self.redis_client.filter_unconsumed_posts(user_did, cached_posts)
                     
-                    # Advance by 20 posts each refresh, allow scrolling through all posts
-                    max_scroll = len(cached_posts) - 50 if len(cached_posts) > 50 else 0  # Leave room for full page
-                    simulated_scroll = (last_position + 20) % max_scroll if max_scroll > 0 else 0
-                    start_idx = simulated_scroll
-                    
-                    # Store new position for this session
-                    self.redis_client.set_value(f"scroll_start:{user_did}", str(simulated_scroll), ttl=60)  # 1min
-                    logger.info(f"Simulated scroll to position {simulated_scroll} for user {user_did or 'anonymous'}")
-                else:
-                    # Normal pagination from stored start point
-                    scroll_start_str = self.redis_client.get_value(f"scroll_start:{user_did}") or "0"
-                    try:
-                        scroll_start = int(scroll_start_str)
-                        start_idx = scroll_start + int(cursor)
-                    except:
-                        start_idx = int(cursor) if cursor else 0
+                    if not cached_posts:
+                        # All posts consumed - get fresh unconsumed posts from cache
+                        all_cached = self.redis_client.get_user_feed(user_did)
+                        if all_cached:
+                            cached_posts = self.redis_client.filter_unconsumed_posts(user_did, all_cached)
+                            if not cached_posts:
+                                # Still nothing - serve some anyway but log the issue
+                                cached_posts = all_cached[:limit]
+                                logger.warning(f"All posts consumed for user {user_did}, serving recent posts anyway")
+                
+                # Handle pagination - consumption tracking eliminates need for complex scroll simulation
+                start_idx = int(cursor) if cursor else 0
                 
                 # Prepare response
                 end_idx = start_idx + limit
@@ -298,6 +290,13 @@ class FeedServer:
                     for post in posts_slice
                     if post.get("post_uri")
                 ]
+                
+                # Mark served posts as consumed to prevent future duplicates
+                if user_did and posts_slice:
+                    served_uris = [post.get("uri") for post in posts_slice if post.get("uri")]
+                    if served_uris:
+                        self.redis_client.mark_posts_consumed(user_did, served_uris)
+                        logger.debug(f"Marked {len(served_uris)} posts as consumed for user {user_did}")
                 
                 # Set next cursor
                 next_cursor = None
