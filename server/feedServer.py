@@ -212,6 +212,19 @@ class FeedServer:
         def root():
             return {"status": "healthy", "service": "feed-server"}
 
+        @self.app.get("/.well-known/did.json")
+        def get_did_document():
+            hostname = os.getenv('FEEDGEN_HOSTNAME', 'localhost')
+            return {
+                "@context": ["https://www.w3.org/ns/did/v1"],
+                "id": f"did:web:{hostname}",
+                "service": [{
+                    "id": "#bsky_fg",
+                    "type": "BskyFeedGenerator", 
+                    "serviceEndpoint": f"https://{hostname}"
+                }]
+            }
+
         @self.app.get("/xrpc/app.bsky.feed.getFeedSkeleton")
         def get_feed_skeleton(request: Request, feed: str, limit: int = 50, cursor: str = None):
             try:
