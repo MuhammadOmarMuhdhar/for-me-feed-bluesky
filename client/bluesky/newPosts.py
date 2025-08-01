@@ -83,8 +83,12 @@ class Client:
                 if not posts:
                     break
                 
-                # Convert posts to dictionaries with engagement metrics
+                # Convert posts to dictionaries with engagement metrics (filter out replies)
                 for post in posts:
+                    # Skip replies - only include original posts
+                    if hasattr(post.record, 'reply') and post.record.reply:
+                        continue
+                        
                     post_data = {
                         'uri': post.uri,
                         'cid': post.cid,

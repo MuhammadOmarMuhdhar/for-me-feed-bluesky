@@ -272,8 +272,8 @@ class FeedServer:
                     except:
                         last_position = 0
                     
-                    # Advance by 20 posts each refresh, stay within top third
-                    max_scroll = min(100, len(cached_posts) // 3) if cached_posts else 0
+                    # Advance by 20 posts each refresh, allow scrolling through all posts
+                    max_scroll = len(cached_posts) - 50 if len(cached_posts) > 50 else 0  # Leave room for full page
                     simulated_scroll = (last_position + 20) % max_scroll if max_scroll > 0 else 0
                     start_idx = simulated_scroll
                     

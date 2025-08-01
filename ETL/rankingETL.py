@@ -99,9 +99,18 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 # Get following (first 100 should be enough for network effects)
                 following_data = user_client.get_user_following(user_did, limit=100)
                 following_list = [f['did'] for f in following_data] if following_data else []
-                logger.info(f"Retrieved {len(following_list)} following accounts for user")
+                logger.info(f"Retrieved {len(following_list)} following accounts for user {user_did}")
+                
+                # Debug: Log first few following accounts
+                if following_list:
+                    logger.info(f"Sample following DIDs: {following_list[:3]}...")
+                else:
+                    logger.warning(f"No following accounts found for user {user_did}")
+                    
             except Exception as e:
-                logger.warning(f"Could not get following list for {user_did}: {e}")
+                logger.error(f"Failed to get following list for {user_did}: {e}")
+                import traceback
+                logger.error(f"Following list error traceback: {traceback.format_exc()}")
                 following_list = []
         
         # Create mock user_data structure for compatibility
@@ -116,13 +125,28 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
             user_data=mock_user_data,
             following_list=following_list,  # Now populated with real following!
             target_count=1000, 
-            time_hours=0.15,
-            following_ratio=0.6,  # Will actually work now!
+            time_hours=6,  # 6 hours for better content variety
+            following_ratio=0.6,  
             keyword_ratio=0.4,
             keyword_extraction_method="advanced",
             include_reposts=True,
-            repost_weight=0.0
+            repost_weight=0.5
         )
+        
+        # Debug: Analyze post sources
+        if new_posts:
+            following_posts = 0
+            keyword_posts = 0
+            
+            for post in new_posts:
+                author_did = post.get('author', {}).get('did', '')
+                if author_did in following_list:
+                    following_posts += 1
+                else:
+                    keyword_posts += 1
+            
+            logger.info(f"Post source breakdown: {following_posts} from network, {keyword_posts} from keywords")
+            logger.info(f"Network effectiveness: {following_posts/len(new_posts)*100:.1f}% from following")
         
         logger.info(f"Collected {len(new_posts)} posts to rank")
         return new_posts
@@ -171,12 +195,16 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
             }
             new_posts.append(new_post)
         
-        # Merge new posts with existing unconsumed posts
+        # Merge new posts with existing unconsumed posts (deduplication via URI)
         merged_posts = {}
+        duplicate_count = 0
         
         # Add new posts (they get priority with fresh scores)
         for post in new_posts:
-            merged_posts[post['post_uri']] = post
+            uri = post['post_uri']
+            if uri in existing_posts:
+                duplicate_count += 1
+            merged_posts[uri] = post  # Always use new score for duplicates
         
         # Add existing posts that aren't in new batch (preserve unconsumed)
         for uri, score in existing_posts.items():
@@ -185,6 +213,8 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
         
         # Sort by score and keep top 500
         final_feed = sorted(merged_posts.values(), key=lambda x: x['score'], reverse=True)[:500]
+        
+        logger.info(f"Deduplication: {duplicate_count} duplicate posts found and updated with fresh scores")
         
         success = redis_client.set_user_feed(user_id, final_feed, ttl=900)  # 15 minutes TTL
         

@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Pure ranking orchestrator - combines similarity methods with configurable weights
-Only handles ranking computation, no data collection or feature engineering
-"""
-
 import numpy as np
 from typing import Dict, List
 import sys

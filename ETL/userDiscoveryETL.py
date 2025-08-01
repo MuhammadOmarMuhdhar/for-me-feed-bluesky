@@ -146,7 +146,7 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
             return None
         
         # Extract keywords from user content
-        keywords = extract_user_keywords(user_data, top_k=20, min_freq=1)
+        keywords = extract_user_keywords(user_data, top_k=50, min_freq=1)
         
         if not keywords:
             logger.warning(f"No keywords extracted for user {user_profile.get('handle')}")
