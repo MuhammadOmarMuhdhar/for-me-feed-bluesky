@@ -102,8 +102,9 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         term_score_pairs = list(zip(feature_names, term_scores))
         term_score_pairs.sort(key=lambda x: x[1], reverse=True)
         
-        # Extract top K terms
-        keywords = [term for term, score in term_score_pairs[:top_k] if score > 0]
+        # Extract top K terms (filter out @handles)
+        keywords = [term for term, score in term_score_pairs[:top_k] 
+                   if score > 0 and not term.startswith('@')]
         
         print(f"Top user keywords: {keywords}")
         return keywords
@@ -146,10 +147,10 @@ def extract_user_keywords_simple(user_data: Dict, top_k: int = 10) -> List[str]:
     # Count and return most frequent
     term_counts = Counter(all_terms)
     
-    # Filter short terms and numbers
+    # Filter short terms, numbers, and @handles
     filtered_counts = {
         term: count for term, count in term_counts.items() 
-        if len(term) > 2 and term.isalpha()
+        if len(term) > 2 and term.isalpha() and not term.startswith('@')
     }
     
     # Return top K most frequent

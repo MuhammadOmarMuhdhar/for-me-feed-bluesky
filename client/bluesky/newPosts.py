@@ -83,10 +83,15 @@ class Client:
                 if not posts:
                     break
                 
-                # Convert posts to dictionaries with engagement metrics (filter out replies)
+                # Convert posts to dictionaries with engagement metrics (filter out replies and low engagement)
                 for post in posts:
                     # Skip replies - only include original posts
                     if hasattr(post.record, 'reply') and post.record.reply:
+                        continue
+                    
+                    # Skip low-engagement posts from search (< 10 likes)
+                    like_count = getattr(post, 'like_count', 0)
+                    if like_count < 10:
                         continue
                         
                     post_data = {
