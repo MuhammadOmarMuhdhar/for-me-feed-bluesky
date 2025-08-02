@@ -263,22 +263,7 @@ class FeedServer:
                         else:
                             logger.warning("No default or trending posts available for fallback")
                 
-                # Filter out already consumed posts to prevent duplicates
-                if user_did and cached_posts:
-                    original_count = len(cached_posts)
-                    cached_posts = self.redis_client.filter_unconsumed_posts(user_did, cached_posts)
-                    
-                    if not cached_posts:
-                        # All posts consumed - get fresh unconsumed posts from cache
-                        all_cached = self.redis_client.get_user_feed(user_did)
-                        if all_cached:
-                            cached_posts = self.redis_client.filter_unconsumed_posts(user_did, all_cached)
-                            if not cached_posts:
-                                # Still nothing - serve some anyway but log the issue
-                                cached_posts = all_cached[:limit]
-                                logger.warning(f"All posts consumed for user {user_did}, serving recent posts anyway")
-                
-                # Handle pagination - consumption tracking eliminates need for complex scroll simulation
+                # Handle pagination - natural progression through ranked list
                 start_idx = int(cursor) if cursor else 0
                 
                 # Prepare response
