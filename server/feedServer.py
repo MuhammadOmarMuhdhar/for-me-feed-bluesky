@@ -201,11 +201,8 @@ class FeedServer:
             }
 
         @self.app.get("/xrpc/app.bsky.feed.getFeedSkeleton")
-        def get_feed_skeleton(request: Request, feed: str, limit: int = 50, cursor: str = None):
+        def get_feed_skeleton(request: Request, feed: str):
             try:
-                # Validate limit
-                limit = min(max(limit, 1), 100)
-                
                 # Get user from auth header
                 auth_header = request.headers.get('authorization', '')
                 user_did = self.decode_user_did(auth_header)
@@ -223,7 +220,15 @@ class FeedServer:
                             args=(user_did, feed),
                             daemon=True
                         ).start()
-                    logger.info(f"Serving {len(cached_posts)} personalized posts to user {user_did or 'anonymous'}")
+                    logger.info(f"Retrieved {len(cached_posts)} personalized posts for user {user_did or 'anonymous'}")
+                    
+                    # Filter out posts user has already consumed to prevent duplicates
+                    unconsumed_posts = self.redis_client.filter_unconsumed_posts(user_did, cached_posts)
+                    logger.info(f"Filtered to {len(unconsumed_posts)} unconsumed posts for user {user_did}")
+                    
+                    # Apply 20-post window to unconsumed posts
+                    cached_posts = unconsumed_posts[:20]
+                    
                 else:
                     # POTENTIALLY NEW USER: Serve default feed, log async
                     if user_did:
@@ -236,26 +241,20 @@ class FeedServer:
                     # Get default feed
                     default_posts = self.redis_client.get_default_feed()
                     if default_posts:
-                        cached_posts = default_posts
-                        logger.info(f"Serving {len(default_posts)} default posts to new user {user_did or 'anonymous'}")
+                        cached_posts = default_posts[:20]  # Apply window to default feed too
+                        logger.info(f"Serving {len(cached_posts)} default posts to new user {user_did or 'anonymous'}")
                     else:
                         # Last resort - fetch trending posts
                         trending_posts = self.get_trending_posts()
                         if trending_posts:
-                            cached_posts = trending_posts
-                            logger.info(f"Serving {len(trending_posts)} trending posts to new user {user_did or 'anonymous'}")
+                            cached_posts = trending_posts[:20]  # Apply window to trending feed too
+                            logger.info(f"Serving {len(cached_posts)} trending posts to new user {user_did or 'anonymous'}")
                         else:
                             logger.warning("No default or trending posts available for fallback")
                 
-                # Handle pagination - natural progression through ranked list
-                start_idx = int(cursor) if cursor else 0
-                
-                # Prepare response
-                end_idx = start_idx + limit
-                posts_slice = cached_posts[start_idx:end_idx]
-                
+                # Build feed items from windowed posts
                 feed_items = []
-                for post in posts_slice:
+                for post in cached_posts:
                     if not post.get("post_uri"):
                         continue
                         
@@ -271,20 +270,13 @@ class FeedServer:
                     feed_items.append(feed_item)
                 
                 # Mark served posts as consumed to prevent future duplicates
-                if user_did and posts_slice:
-                    served_uris = [post.get("uri") for post in posts_slice if post.get("uri")]
+                if user_did and cached_posts:
+                    served_uris = [post.get("uri") for post in cached_posts if post.get("uri")]
                     if served_uris:
                         self.redis_client.mark_posts_consumed(user_did, served_uris)
                         logger.debug(f"Marked {len(served_uris)} posts as consumed for user {user_did}")
                 
-                # Set next cursor
-                next_cursor = None
-                if end_idx < len(cached_posts):
-                    next_cursor = str(end_idx)
-                
                 response = {"feed": feed_items}
-                if next_cursor:
-                    response["cursor"] = next_cursor
                 
                 logger.info(f"Served {len(feed_items)} posts to user {user_did or 'anonymous'}")
                 return response

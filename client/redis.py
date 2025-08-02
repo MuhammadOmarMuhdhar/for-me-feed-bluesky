@@ -258,14 +258,14 @@ class Client:
             self.logger.error(f"Failed to get value for key {key}: {e}")
             return None
 
-    def mark_posts_consumed(self, user_id: str, post_uris: List[str], ttl: int = 259200) -> bool:
+    def mark_posts_consumed(self, user_id: str, post_uris: List[str], ttl: int = 21600) -> bool:
         """
-        Mark posts as consumed by a user with memory-optimized hashing (3 day TTL)
+        Mark posts as consumed by a user with memory-optimized hashing (6 hour TTL)
         
         Args:
             user_id: User identifier
             post_uris: List of post URIs that were served to user
-            ttl: Time to live in seconds (default: 3 days)
+            ttl: Time to live in seconds (default: 6 hours)
         
         Returns:
             True if successful, False otherwise
