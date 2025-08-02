@@ -67,7 +67,7 @@ jobs:
                   bigquery.SchemaField('first_discovered_at', 'TIMESTAMP'),
                   bigquery.SchemaField('last_seen_at', 'TIMESTAMP'),
                   bigquery.SchemaField('created_at', 'TIMESTAMP'),
-                  bigquery.SchemaField('updated_at', 'TIMESTAMP')
+                  bigquery.SchemaField('updated_at', 'TIMESTAMP'),
                   bigquery.SchemaField('app_password', 'STRING')
               ]
               
