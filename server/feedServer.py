@@ -85,36 +85,27 @@ class FeedServer:
                 return
 
             current_time = datetime.utcnow()
-            logger.info(f"Building UPSERT query for {user_did} at {current_time.isoformat()}")
+            logger.info(f"Building INSERT query for {user_did} at {current_time.isoformat()}")
             
-            # Use MERGE (UPSERT) to prevent duplicates - atomic operation
-            upsert_query = f"""
-            MERGE `{bq_client.project_id}.data.users` AS target
-            USING (
-                SELECT 
-                    '{user_did}' AS user_id,
-                    '' AS handle,
-                    JSON '[]' AS keywords,
-                    TIMESTAMP('{current_time.isoformat()}') AS last_request_at,
-                    1 AS request_count,
-                    TIMESTAMP('{current_time.isoformat()}') AS created_at,
-                    TIMESTAMP('{current_time.isoformat()}') AS updated_at
-            ) AS source
-            ON target.user_id = source.user_id
-            WHEN MATCHED THEN
-                UPDATE SET
-                    last_request_at = source.last_request_at,
-                    request_count = target.request_count + 1,
-                    updated_at = source.updated_at
-            WHEN NOT MATCHED THEN
-                INSERT (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
-                VALUES (source.user_id, source.handle, source.keywords, source.last_request_at, source.request_count, source.created_at, source.updated_at)
+            # Simple INSERT - duplicates will be handled by ETL cleanup
+            insert_query = f"""
+            INSERT INTO `{bq_client.project_id}.data.users` 
+            (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
+            VALUES (
+                '{user_did}',
+                '',
+                JSON '[]',
+                TIMESTAMP('{current_time.isoformat()}'),
+                1,
+                TIMESTAMP('{current_time.isoformat()}'),
+                TIMESTAMP('{current_time.isoformat()}')
+            )
             """
             
-            logger.info(f"Executing BigQuery UPSERT...")
-            result = bq_client.query(upsert_query)
+            logger.info(f"Executing BigQuery INSERT...")
+            result = bq_client.query(insert_query)
             logger.info(f"BigQuery query result: {result}")
-            logger.info(f"SUCCESS: Upserted user record for {user_did}")
+            logger.info(f"SUCCESS: Inserted user record for {user_did}")
                 
         except Exception as e:
             logger.error(f"FAILED to log request to BigQuery: {e}")
