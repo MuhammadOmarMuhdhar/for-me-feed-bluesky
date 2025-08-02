@@ -74,57 +74,41 @@ class FeedServer:
         return self.bigquery_client
 
     def log_request_to_bigquery(self, user_did: str, feed_uri: str):
-        """Log feed request directly to BigQuery for user discovery"""
+        """Log feed request directly to BigQuery for user discovery using UPSERT"""
         try:
             bq_client = self.get_bigquery_client()
             if not bq_client:
                 logger.warning("BigQuery client not available, skipping request logging")
                 return
 
-            import pandas as pd
-            
-            # Check if user already exists
-            existing_user_query = f"""
-            SELECT user_id, request_count, last_request_at
-            FROM `{bq_client.project_id}.data.users` 
-            WHERE user_id = '{user_did}'
-            LIMIT 1
-            """
-            
-            existing_result = bq_client.query(existing_user_query)
             current_time = datetime.utcnow()
             
-            if not existing_result.empty:
-                # Update existing user
-                current_count = existing_result.iloc[0]['request_count'] or 0
-                new_count = current_count + 1
-                
-                update_query = f"""
-                UPDATE `{bq_client.project_id}.data.users`
-                SET last_request_at = '{current_time.isoformat()}',
-                    request_count = {new_count},
-                    updated_at = '{current_time.isoformat()}'
-                WHERE user_id = '{user_did}'
-                """
-                
-                bq_client.query(update_query)
-                logger.info(f"Updated request count for existing user {user_did}: {new_count}")
-                
-            else:
-                # Create new user record with minimal data
-                user_data = [{
-                    'user_id': user_did,
-                    'handle': '',  # Will be populated by user discovery ETL
-                    'keywords': [],
-                    'last_request_at': current_time,
-                    'request_count': 1,
-                    'created_at': current_time,
-                    'updated_at': current_time
-                }]
-                
-                df = pd.DataFrame(user_data)
-                bq_client.append(df, 'data', 'users', create_if_not_exists=True)
-                logger.info(f"Created new user record for {user_did}")
+            # Use MERGE (UPSERT) to prevent duplicates - atomic operation
+            upsert_query = f"""
+            MERGE `{bq_client.project_id}.data.users` AS target
+            USING (
+                SELECT 
+                    '{user_did}' AS user_id,
+                    '' AS handle,
+                    [] AS keywords,
+                    TIMESTAMP('{current_time.isoformat()}') AS last_request_at,
+                    1 AS request_count,
+                    TIMESTAMP('{current_time.isoformat()}') AS created_at,
+                    TIMESTAMP('{current_time.isoformat()}') AS updated_at
+            ) AS source
+            ON target.user_id = source.user_id
+            WHEN MATCHED THEN
+                UPDATE SET
+                    last_request_at = source.last_request_at,
+                    request_count = target.request_count + 1,
+                    updated_at = source.updated_at
+            WHEN NOT MATCHED THEN
+                INSERT (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
+                VALUES (source.user_id, source.handle, source.keywords, source.last_request_at, source.request_count, source.created_at, source.updated_at)
+            """
+            
+            bq_client.query(upsert_query)
+            logger.info(f"Upserted user record for {user_did}")
                 
         except Exception as e:
             logger.error(f"Failed to log request to BigQuery: {e}")

@@ -63,7 +63,7 @@ def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: d
     """
     try:
         query = f"""
-        SELECT user_id, last_request_at, request_count
+        SELECT DISTINCT user_id, last_request_at, request_count
         FROM `{bq_client.project_id}.data.users`
         WHERE (handle = '' OR handle IS NULL)
         AND last_request_at >= '{since_timestamp.isoformat()}'
