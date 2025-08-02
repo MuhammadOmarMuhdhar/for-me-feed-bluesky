@@ -262,7 +262,7 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
     try:
         # Get existing cache to preserve unconsumed posts
         existing_feed = redis_client.get_user_feed(user_id) or []
-        existing_posts = {post['post_uri']: post['score'] for post in existing_feed} if existing_feed else {}
+        existing_posts = {post.get('post_uri', post.get('uri', '')): post for post in existing_feed} if existing_feed else {}
         
         # Create cache with only essential data for Bluesky feed API
         new_posts = []
@@ -271,9 +271,22 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
             if not post_uri:
                 continue
                 
+            # Preserve all post fields for feed server
             new_post = {
                 'post_uri': post_uri,
-                'score': float(post.get('bm25_score', 0))  # Ensure Python float
+                'uri': post_uri,  # Add uri field for consumption tracking
+                'score': float(post.get('bm25_score', 0)),
+                'combined_score': float(post.get('bm25_score', 0)),  # Feed server expects this
+                'text': post.get('text', ''),
+                'author_handle': post.get('author', {}).get('handle', ''),
+                'like_count': post.get('like_count', 0),
+                'repost_count': post.get('repost_count', 0),
+                'reply_count': post.get('reply_count', 0),
+                'created_at': post.get('created_at', ''),
+                'source': post.get('source', 'search'),
+                'post_type': post.get('post_type', 'original'),
+                'followed_user': post.get('followed_user', None),
+                'bm25_score': float(post.get('bm25_score', 0))
             }
             new_posts.append(new_post)
         
@@ -289,9 +302,30 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
             merged_posts[uri] = post  # Always use new score for duplicates
         
         # Add existing posts that aren't in new batch (preserve unconsumed)
-        for uri, score in existing_posts.items():
+        for uri, post_data in existing_posts.items():
             if uri not in merged_posts:
-                merged_posts[uri] = {'post_uri': uri, 'score': score}
+                # Preserve existing post if it's a full object, otherwise create minimal
+                if isinstance(post_data, dict) and 'text' in post_data:
+                    merged_posts[uri] = post_data
+                else:
+                    # Fallback for old cache format (just score)
+                    score = post_data if isinstance(post_data, (int, float)) else 0
+                    merged_posts[uri] = {
+                        'post_uri': uri,
+                        'uri': uri,
+                        'score': float(score),
+                        'combined_score': float(score),
+                        'text': '',
+                        'author_handle': '',
+                        'like_count': 0,
+                        'repost_count': 0,
+                        'reply_count': 0,
+                        'created_at': '',
+                        'source': 'cache',
+                        'post_type': 'original',
+                        'followed_user': None,
+                        'bm25_score': float(score)
+                    }
         
         # Sort by score and keep top 500
         final_feed = sorted(merged_posts.values(), key=lambda x: x['score'], reverse=True)[:500]
