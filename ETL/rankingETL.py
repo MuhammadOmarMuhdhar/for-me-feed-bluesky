@@ -21,6 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: bool = False) -> List[Dict]:
     """Get active users with their stored keywords from BigQuery"""
     try:
@@ -66,7 +67,6 @@ def get_user_keywords_as_terms(user_keywords) -> List[str]:
         # Process keywords list
         for kw in keywords_list:
             if isinstance(kw, dict) and 'keyword' in kw:
-                # BigQuery STRUCT format: {'keyword': 'startup', 'score': 0.8}
                 keyword = kw['keyword']
                 score = kw.get('score', 1.0)
                 # Add keyword multiple times based on score (weight)
@@ -96,8 +96,8 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 from client.bluesky.userData import Client as UserDataClient
                 user_client = UserDataClient()
                 user_client.login()
-                # Get following (first 100 should be enough for network effects)
-                following_data = user_client.get_user_follows(user_did, limit=100)
+                # Get following 
+                following_data = user_client.get_all_user_follows(user_did)
                 following_list = following_data if following_data else []  # Keep full objects
                 logger.info(f"Retrieved {len(following_list)} following accounts for user {user_did}")
                 
@@ -124,9 +124,9 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
         
         new_posts = posts_client.get_posts_hybrid(
             user_data=mock_user_data,
-            following_list=following_list,  # Now populated with real following!
+            following_list=following_list,  
             target_count=1000, 
-            time_hours=6,  # 6 hours for better content variety
+            time_hours=2,  
             following_ratio=0.6,  
             keyword_ratio=0.4,
             keyword_extraction_method="advanced",
@@ -172,6 +172,7 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 logger.info(f"Network effectiveness: {following_posts/len(new_posts)*100:.1f}% from following")
         
         logger.info(f"Collected {len(new_posts)} posts to rank")
+        
         return new_posts
         
     except Exception as e:
@@ -218,7 +219,7 @@ def boost_network_posts(ranked_posts: List[Dict], user_did: str) -> List[Dict]:
             from client.bluesky.userData import Client as UserDataClient
             user_client = UserDataClient()
             user_client.login()
-            following_data = user_client.get_user_follows(user_did, limit=100)
+            following_data = user_client.get_all_user_follows(user_did)
             following_dids = {f.get('did', '') for f in following_data if isinstance(f, dict)}
             logger.info(f"Retrieved {len(following_dids)} following DIDs for network boost")
         except Exception as e:
@@ -421,6 +422,7 @@ def main():
         credentials_json = json.loads(os.environ['BIGQUERY_CREDENTIALS_JSON'])
         bq_client = BigQueryClient(credentials_json, os.environ['BIGQUERY_PROJECT_ID'])
         redis_client = RedisClient()
+        
         
         # Get users with their stored keywords
         users = get_users_with_keywords_from_bigquery(bq_client, test_mode)

@@ -75,13 +75,17 @@ class FeedServer:
 
     def log_request_to_bigquery(self, user_did: str, feed_uri: str):
         """Log feed request directly to BigQuery for user discovery using UPSERT"""
+        logger.info(f"Starting log_request_to_bigquery for user {user_did}")
+        
         try:
+            logger.info(f"Getting BigQuery client...")
             bq_client = self.get_bigquery_client()
             if not bq_client:
-                logger.warning("BigQuery client not available, skipping request logging")
+                logger.warning(f"BigQuery client not available, skipping request logging")
                 return
 
             current_time = datetime.utcnow()
+            logger.info(f"Building UPSERT query for {user_did} at {current_time.isoformat()}")
             
             # Use MERGE (UPSERT) to prevent duplicates - atomic operation
             upsert_query = f"""
@@ -90,7 +94,7 @@ class FeedServer:
                 SELECT 
                     '{user_did}' AS user_id,
                     '' AS handle,
-                    [] AS keywords,
+                    JSON '[]' AS keywords,
                     TIMESTAMP('{current_time.isoformat()}') AS last_request_at,
                     1 AS request_count,
                     TIMESTAMP('{current_time.isoformat()}') AS created_at,
@@ -107,11 +111,15 @@ class FeedServer:
                 VALUES (source.user_id, source.handle, source.keywords, source.last_request_at, source.request_count, source.created_at, source.updated_at)
             """
             
-            bq_client.query(upsert_query)
-            logger.info(f"Upserted user record for {user_did}")
+            logger.info(f"Executing BigQuery UPSERT...")
+            result = bq_client.query(upsert_query)
+            logger.info(f"BigQuery query result: {result}")
+            logger.info(f"SUCCESS: Upserted user record for {user_did}")
                 
         except Exception as e:
-            logger.error(f"Failed to log request to BigQuery: {e}")
+            logger.error(f"FAILED to log request to BigQuery: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             # Don't fail the request if logging fails
 
     def get_bluesky_client(self):
@@ -213,13 +221,10 @@ class FeedServer:
                     cached_posts = self.redis_client.get_user_feed(user_did) or []
                 
                 if cached_posts:
-                    # EXISTING USER: Serve personalized feed, log async
+                    # EXISTING USER: Serve personalized feed, log request
                     if user_did:
-                        threading.Thread(
-                            target=self.log_request_to_bigquery, 
-                            args=(user_did, feed),
-                            daemon=True
-                        ).start()
+                        logger.info(f"Logging request for existing user {user_did}")
+                        self.log_request_to_bigquery(user_did, feed)
                     logger.info(f"Retrieved {len(cached_posts)} personalized posts for user {user_did or 'anonymous'}")
                     
                     # Filter out posts user has already consumed to prevent duplicates
@@ -230,13 +235,12 @@ class FeedServer:
                     cached_posts = unconsumed_posts[:20]
                     
                 else:
-                    # POTENTIALLY NEW USER: Serve default feed, log async
+                    # POTENTIALLY NEW USER: Serve default feed, log request
                     if user_did:
-                        threading.Thread(
-                            target=self.log_request_to_bigquery, 
-                            args=(user_did, feed),
-                            daemon=True
-                        ).start()
+                        logger.info(f"Logging request for new user {user_did}")
+                        self.log_request_to_bigquery(user_did, feed)
+                    else:
+                        logger.info("No user DID extracted from auth header")
                     
                     # Get default feed
                     default_posts = self.redis_client.get_default_feed()

@@ -569,6 +569,7 @@ class Client:
         except Exception as e:
             print(f"WebSocket connection error: {e}")
     
+    
     def _build_query_string(self, params: Dict) -> str:
         """Build query string from parameters"""
         return "&".join([f"{k}={v}" if isinstance(v, str) else f"{k}={','.join(v)}" 
