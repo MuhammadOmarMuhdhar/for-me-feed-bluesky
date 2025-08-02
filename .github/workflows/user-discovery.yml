@@ -68,6 +68,7 @@ jobs:
                   bigquery.SchemaField('last_seen_at', 'TIMESTAMP'),
                   bigquery.SchemaField('created_at', 'TIMESTAMP'),
                   bigquery.SchemaField('updated_at', 'TIMESTAMP')
+                  bigquery.SchemaField('app_password', 'STRING')
               ]
               
               table_ref = bq_client.client.dataset('data').table('users')
