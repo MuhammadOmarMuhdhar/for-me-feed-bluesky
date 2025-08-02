@@ -11,6 +11,27 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from featureEngineering.textPreprocessing import preprocess_for_bm25, remove_stopwords
 
 
+def extract_handle_components(text: str) -> Set[str]:
+    """Extract all components from handles in text for filtering"""
+    import re
+    handle_components = set()
+    
+    # Find all handles (@ followed by domain-like patterns)
+    handle_pattern = r'@[\w.-]+\.[\w.-]+'
+    handles = re.findall(handle_pattern, text)
+    
+    for handle in handles:
+        # Remove @ and split by dots to get all components
+        clean_handle = handle[1:]  # Remove @
+        parts = clean_handle.replace('.', ' ').split()
+        handle_components.update(parts)
+    
+    # Also add common domain extensions and social media domains
+    common_domains = {'com', 'org', 'net', 'social', 'app', 'bsky', 'bluesky'}
+    handle_components.update(common_domains)
+    
+    return handle_components
+
 def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -> List[str]:
     """
     Extract distinctive keywords from user's engagement data using scikit-learn TF-IDF
@@ -25,9 +46,10 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
     """
     print(f"Extracting top {top_k} user keywords using TF-IDF...")
     
-    # Collect user text with engagement weights
+    # Collect user text with engagement weights AND identify handle components
     documents = []
     engagement_weights = []
+    all_handle_components = set()
     
     # Posts - what they create (weight: 2)
     for post in user_data.get('posts', []):
@@ -35,6 +57,7 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         if text:
             documents.append(text)
             engagement_weights.append(2.0)
+            all_handle_components.update(extract_handle_components(text))
     
     # Reposts - what they amplify (weight: 3) 
     for repost in user_data.get('reposts', []):
@@ -42,6 +65,7 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         if text:
             documents.append(text)
             engagement_weights.append(3.0)
+            all_handle_components.update(extract_handle_components(text))
     
     # Replies - what they engage with (weight: 1.5)
     for reply in user_data.get('replies', []):
@@ -49,6 +73,7 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         if text:
             documents.append(text)
             engagement_weights.append(1.5)
+            all_handle_components.update(extract_handle_components(text))
     
     # Likes - what they consume (weight: 1)
     for like in user_data.get('likes', []):
@@ -56,12 +81,14 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         if text:
             documents.append(text)
             engagement_weights.append(1.0)
+            all_handle_components.update(extract_handle_components(text))
     
     if not documents:
         print("No user text found for keyword extraction")
         return []
     
     print(f"Processing {len(documents)} documents with engagement weights")
+    print(f"Identified {len(all_handle_components)} handle components to filter: {list(all_handle_components)[:10]}...")
     
     # Custom preprocessing function to use existing text preprocessing
     def preprocess_text(text):
@@ -102,9 +129,12 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         term_score_pairs = list(zip(feature_names, term_scores))
         term_score_pairs.sort(key=lambda x: x[1], reverse=True)
         
-        # Extract top K terms (filter out @handles)
-        keywords = [term for term, score in term_score_pairs[:top_k] 
-                   if score > 0 and not term.startswith('@')]
+        # Extract top K terms (filter out handles and their components)
+        keywords = [term for term, score in term_score_pairs[:top_k*2]  # Get more to account for filtering
+                   if score > 0 and not term.startswith('@') and term.lower() not in all_handle_components]
+        
+        # Take only the top_k after filtering
+        keywords = keywords[:top_k]
         
         print(f"Top user keywords: {keywords}")
         return keywords

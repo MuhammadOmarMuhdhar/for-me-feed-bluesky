@@ -358,7 +358,7 @@ class Client:
                 raise Exception("likes_username and likes_password are required when include_likes=True")
             
             # Create separate client for likes authentication
-            likes_client = BlueskyUserDataClient()
+            likes_client = Client()
             try:
                 likes_client.login(likes_username, likes_password)
                 
