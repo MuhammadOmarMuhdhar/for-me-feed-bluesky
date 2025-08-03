@@ -170,19 +170,15 @@ class FeedServer:
                 logger.warning("No trending posts retrieved from Bluesky")
                 return []
 
-            # Convert to feed format
+            # Convert to minimal feed format (consistent with user feeds)
             formatted_posts = []
             for post in trending_posts:
                 formatted_post = {
                     "post_uri": post['uri'],
-                    "combined_score": post['engagement_score'],
-                    "like_count": post['like_count'],
-                    "repost_count": post['repost_count'],
-                    "reply_count": post['reply_count'],
-                    "created_at": post['created_at'],
-                    "author_handle": post['author']['handle'],
-                    "text": post['text'][:200],  # Truncate for cache efficiency
-                    "source": "trending"
+                    "uri": post['uri'],  # Required for consumption tracking
+                    "score": post['engagement_score'],  # Required for sorting
+                    "post_type": "original",  # Default for trending posts
+                    "followed_user": None  # Not applicable for trending
                 }
                 formatted_posts.append(formatted_post)
 

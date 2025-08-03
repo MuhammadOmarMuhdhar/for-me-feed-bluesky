@@ -171,8 +171,8 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
         new_posts = posts_client.get_posts_hybrid(
             user_data=mock_user_data,
             following_list=following_list,  
-            target_count=1000, 
-            time_hours=2,  
+            target_count=10000, 
+            time_hours=3,  
             following_ratio=0.6,  
             keyword_ratio=0.4,
             keyword_extraction_method="advanced",
@@ -364,22 +364,13 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
             if not post_uri:
                 continue
                 
-            # Preserve all post fields for feed server
+            # Store only essential fields for feed server (70% memory reduction)
             new_post = {
                 'post_uri': post_uri,
-                'uri': post_uri,  # Add uri field for consumption tracking
-                'score': float(post.get('bm25_score', 0)),
-                'combined_score': float(post.get('bm25_score', 0)),  # Feed server expects this
-                'text': post.get('text', ''),
-                'author_handle': post.get('author', {}).get('handle', ''),
-                'like_count': post.get('like_count', 0),
-                'repost_count': post.get('repost_count', 0),
-                'reply_count': post.get('reply_count', 0),
-                'created_at': post.get('created_at', ''),
-                'source': post.get('source', 'search'),
-                'post_type': post.get('post_type', 'original'),
-                'followed_user': post.get('followed_user', None),
-                'bm25_score': float(post.get('bm25_score', 0))
+                'uri': post_uri,  # Required for consumption tracking
+                'score': float(post.get('bm25_score', 0)),  # Required for sorting
+                'post_type': post.get('post_type', 'original'),  # Required for repost detection
+                'followed_user': post.get('followed_user', None)  # Required for repost attribution
             }
             new_posts.append(new_post)
         
@@ -397,31 +388,29 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
         # Add existing posts that aren't in new batch (preserve unconsumed)
         for uri, post_data in existing_posts.items():
             if uri not in merged_posts:
-                # Preserve existing post if it's a full object, otherwise create minimal
-                if isinstance(post_data, dict) and 'text' in post_data:
-                    merged_posts[uri] = post_data
+                # Preserve existing post but extract only essential fields
+                if isinstance(post_data, dict) and ('score' in post_data or 'combined_score' in post_data):
+                    # Extract only essential fields from existing data
+                    score = post_data.get('score', post_data.get('combined_score', 0))
+                    merged_posts[uri] = {
+                        'post_uri': uri,
+                        'uri': uri,
+                        'score': float(score),
+                        'post_type': post_data.get('post_type', 'original'),
+                        'followed_user': post_data.get('followed_user', None)
+                    }
                 else:
-                    # Fallback for old cache format (just score)
+                    # Fallback for old cache format (just score) - minimal fields only
                     score = post_data if isinstance(post_data, (int, float)) else 0
                     merged_posts[uri] = {
                         'post_uri': uri,
                         'uri': uri,
                         'score': float(score),
-                        'combined_score': float(score),
-                        'text': '',
-                        'author_handle': '',
-                        'like_count': 0,
-                        'repost_count': 0,
-                        'reply_count': 0,
-                        'created_at': '',
-                        'source': 'cache',
                         'post_type': 'original',
-                        'followed_user': None,
-                        'bm25_score': float(score)
+                        'followed_user': None
                     }
         
-        # Sort by score and keep top 500
-        final_feed = sorted(merged_posts.values(), key=lambda x: x['score'], reverse=True)[:500]
+        final_feed = sorted(merged_posts.values(), key=lambda x: x['score'], reverse=True)[:1500]
         
         logger.info(f"Deduplication: {duplicate_count} duplicate posts found and updated with fresh scores")
         
@@ -467,19 +456,15 @@ def update_default_feed_if_needed(redis_client: RedisClient):
             logger.warning("No popular posts found for default feed")
             return
         
-        # Convert to feed format (same as personalized feeds)
+        # Convert to minimal feed format (consistent with personalized feeds)
         formatted_posts = []
         for post in popular_posts:
             formatted_post = {
                 "post_uri": post['uri'],
-                "combined_score": post['engagement_score'],
-                "like_count": post['like_count'],
-                "repost_count": post['repost_count'],
-                "reply_count": post['reply_count'],
-                "created_at": post['created_at'],
-                "author_handle": post['author']['handle'],
-                "text": post['text'][:200],  # Truncate for cache efficiency
-                "source": "default_daily"
+                "uri": post['uri'],  # Required for consumption tracking
+                "score": post['engagement_score'],  # Required for sorting
+                "post_type": "original",  # Default for trending posts
+                "followed_user": None  # Not applicable for trending
             }
             formatted_posts.append(formatted_post)
         
