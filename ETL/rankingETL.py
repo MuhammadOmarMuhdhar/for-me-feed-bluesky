@@ -34,7 +34,7 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
             handle,
             keywords
         FROM `{bq_client.project_id}.data.users`
-        WHERE last_request_at >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 30 DAY)
+        WHERE last_request_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
         ORDER BY last_request_at DESC
         {limit_clause}
         """
@@ -52,11 +52,19 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
 def get_user_keywords_as_terms(user_keywords) -> List[str]:
     """Convert stored keywords to term list for BM25"""
     try:
+        import json
         terms = []
         
-        # BigQuery JSON columns return as Python objects directly
+        # Handle different formats of keywords from BigQuery JSON
         if isinstance(user_keywords, list):
             keywords_list = user_keywords
+        elif isinstance(user_keywords, str):
+            # JSON string that needs parsing
+            try:
+                keywords_list = json.loads(user_keywords)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in keywords: {user_keywords}")
+                return []
         elif user_keywords is None:
             return []
         else:
