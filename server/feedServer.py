@@ -85,13 +85,26 @@ class FeedServer:
 
             current_time = datetime.utcnow()
             
-            # Simple INSERT for new users (no MERGE needed since we check Redis first)
+            # INSERT with duplicate protection (handles any remaining race conditions)
             from google.cloud import bigquery
             
+            # Use MERGE for absolute duplicate protection
             insert_query = f"""
-            INSERT INTO `{bq_client.project_id}.data.users` 
-            (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
-            VALUES (@user_id, @handle, @keywords, @timestamp, @request_count, @timestamp, @timestamp)
+            MERGE `{bq_client.project_id}.data.users` AS target
+            USING (
+                SELECT 
+                    @user_id AS user_id,
+                    @handle AS handle,
+                    @keywords AS keywords,
+                    @timestamp AS last_request_at,
+                    @request_count AS request_count,
+                    @timestamp AS created_at,
+                    @timestamp AS updated_at
+            ) AS source
+            ON target.user_id = source.user_id
+            WHEN NOT MATCHED THEN
+                INSERT (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
+                VALUES (source.user_id, source.handle, source.keywords, source.last_request_at, source.request_count, source.created_at, source.updated_at)
             """
             
             job_config = bigquery.QueryJobConfig(
@@ -115,6 +128,51 @@ class FeedServer:
             logger.error(f"Full traceback: {traceback.format_exc()}")
             # Don't fail the request if logging fails
 
+    def is_truly_new_user(self, user_did: str) -> bool:
+        """Check if user is truly new by verifying both Redis and BigQuery"""
+        try:
+            # First check Redis (fast)
+            if not self.redis_client.is_new_user(user_did):
+                logger.debug(f"User {user_did} found in Redis activity - not new")
+                return False
+            
+            # If Redis says new, double-check BigQuery to prevent duplicates
+            bq_client = self.get_bigquery_client()
+            if bq_client:
+                from google.cloud import bigquery
+                
+                check_query = f"""
+                SELECT COUNT(*) as count 
+                FROM `{bq_client.project_id}.data.users` 
+                WHERE user_id = @user_id
+                """
+                
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("user_id", "STRING", user_did)
+                    ]
+                )
+                
+                query_job = bq_client.client.query(check_query, job_config=job_config)
+                result = query_job.result()
+                count = list(result)[0]['count']
+                
+                if count > 0:
+                    logger.info(f"User {user_did} exists in BigQuery but not Redis - syncing activity")
+                    # Sync to Redis to prevent future BigQuery checks
+                    self.redis_client.track_user_activity(user_did)
+                    return False
+                else:
+                    logger.info(f"User {user_did} confirmed new in both Redis and BigQuery")
+                    return True
+            else:
+                logger.warning("BigQuery client not available, assuming new user")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error checking if user {user_did} is new: {e}")
+            return False  # Default to not new to prevent duplicates
+
     def handle_user_request(self, user_did: str, feed_uri: str):
         """Handle user request with Redis activity tracking and new-user BigQuery logging"""
         if not user_did:
@@ -123,8 +181,8 @@ class FeedServer:
         # Always track activity in Redis (fast, no duplicates possible)
         self.redis_client.track_user_activity(user_did)
         
-        # Only log new users to BigQuery (prevents duplicates and reduces load)
-        if self.redis_client.is_new_user(user_did):
+        # Only log truly new users to BigQuery (prevents duplicates)
+        if self.is_truly_new_user(user_did):
             logger.info(f"New user detected: {user_did}")
             self.log_new_user_to_bigquery(user_did, feed_uri)
         else:
