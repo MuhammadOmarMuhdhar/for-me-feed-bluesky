@@ -178,11 +178,14 @@ class FeedServer:
         if not user_did:
             return
         
+        # Check if user is truly new BEFORE tracking activity in Redis
+        is_new = self.is_truly_new_user(user_did)
+        
         # Always track activity in Redis (fast, no duplicates possible)
         self.redis_client.track_user_activity(user_did)
         
         # Only log truly new users to BigQuery (prevents duplicates)
-        if self.is_truly_new_user(user_did):
+        if is_new:
             logger.info(f"New user detected: {user_did}")
             self.log_new_user_to_bigquery(user_did, feed_uri)
         else:
