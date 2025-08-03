@@ -22,8 +22,51 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: bool = False) -> List[Dict]:
-    """Get active users with their stored keywords from BigQuery"""
+def get_active_users_with_keywords(redis_client: RedisClient, bq_client: BigQueryClient, test_mode: bool = False) -> List[Dict]:
+    """Get active users with their stored keywords from Redis + BigQuery"""
+    try:
+        # Get active users from Redis (fast, real-time activity)
+        active_user_ids = redis_client.get_active_users(days=30)
+        
+        if not active_user_ids:
+            logger.warning("No active users found in Redis, falling back to BigQuery")
+            return get_users_with_keywords_from_bigquery_fallback(bq_client, test_mode)
+        
+        # Limit in test mode
+        if test_mode:
+            active_user_ids = active_user_ids[:5]
+        
+        logger.info(f"Found {len(active_user_ids)} active users from Redis")
+        
+        # Get keywords for active users from BigQuery
+        if not active_user_ids:
+            return []
+        
+        # Create parameterized query for active users
+        user_ids_str = "', '".join(active_user_ids)
+        query = f"""
+        SELECT 
+            user_id,
+            handle,
+            keywords
+        FROM `{bq_client.project_id}.data.users`
+        WHERE user_id IN ('{user_ids_str}')
+        AND keywords IS NOT NULL
+        """
+        
+        result = bq_client.query(query)
+        users = result.to_dict('records') if not result.empty else []
+        
+        logger.info(f"Retrieved keywords for {len(users)} active users from BigQuery")
+        return users
+        
+    except Exception as e:
+        logger.error(f"Error getting active users: {e}")
+        logger.warning("Falling back to BigQuery-only approach")
+        return get_users_with_keywords_from_bigquery_fallback(bq_client, test_mode)
+
+def get_users_with_keywords_from_bigquery_fallback(bq_client: BigQueryClient, test_mode: bool = False) -> List[Dict]:
+    """Fallback: Get active users with their stored keywords from BigQuery only"""
     try:
         # Only limit in test mode for development
         limit_clause = "LIMIT 5" if test_mode else ""
@@ -42,7 +85,7 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
         result = bq_client.query(query)
         users = result.to_dict('records') if not result.empty else []
         
-        logger.info(f"Retrieved {len(users)} active users with keywords from BigQuery")
+        logger.info(f"Retrieved {len(users)} active users with keywords from BigQuery (fallback)")
         return users
         
     except Exception as e:
@@ -184,6 +227,45 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return []
 
+def load_blocked_users() -> set:
+    """Load blocked users from moderation file"""
+    try:
+        moderation_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'moderation', 'moderation.txt')
+        
+        if not os.path.exists(moderation_file):
+            logger.warning(f"Moderation file not found: {moderation_file}")
+            return set()
+        
+        with open(moderation_file, 'r', encoding='utf-8') as f:
+            blocked_users = {line.strip() for line in f if line.strip()}
+        
+        logger.info(f"Loaded {len(blocked_users):,} blocked users for moderation")
+        return blocked_users
+        
+    except Exception as e:
+        logger.error(f"Failed to load moderation file: {e}")
+        return set()
+
+def filter_blocked_posts(posts: List[Dict], blocked_users: set) -> List[Dict]:
+    """Filter out posts from blocked users"""
+    if not blocked_users:
+        return posts
+    
+    original_count = len(posts)
+    filtered_posts = []
+    
+    for post in posts:
+        author_handle = post.get('author', {}).get('handle', '')
+        if author_handle not in blocked_users:
+            filtered_posts.append(post)
+    
+    blocked_count = original_count - len(filtered_posts)
+    if blocked_count > 0:
+        filter_rate = blocked_count / original_count * 100
+        logger.info(f"Moderation: blocked {blocked_count}/{original_count} posts ({filter_rate:.1f}%)")
+    
+    return filtered_posts
+
 def calculate_rankings(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
     """Calculate TF-IDF/BM25 rankings using pre-stored keywords"""
     try:
@@ -191,8 +273,15 @@ def calculate_rankings(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
             logger.warning("No user terms provided for ranking")
             return []
         
-        # Calculate BM25 similarity using stored keywords
-        ranked_posts = compute_bm25_similarity(user_terms, posts)
+        # Load blocked users and filter posts before ranking
+        blocked_users = load_blocked_users()
+        filtered_posts = filter_blocked_posts(posts, blocked_users)
+        
+        if len(filtered_posts) < len(posts):
+            logger.info(f"Moderation filtering: {len(posts)} -> {len(filtered_posts)} posts")
+        
+        # Calculate BM25 similarity using stored keywords on filtered posts
+        ranked_posts = compute_bm25_similarity(user_terms, filtered_posts)
         
         # Sort by BM25 score
         ranked_posts = sorted(ranked_posts, key=lambda x: x.get('bm25_score', 0), reverse=True)
@@ -427,8 +516,8 @@ def main():
         redis_client = RedisClient()
         
         
-        # Get users with their stored keywords
-        users = get_users_with_keywords_from_bigquery(bq_client, test_mode)
+        # Get users with their stored keywords (Redis + BigQuery hybrid)
+        users = get_active_users_with_keywords(redis_client, bq_client, test_mode)
         
         if not users:
             logger.warning("No users found to process, but will still update default feed")

@@ -3,7 +3,8 @@ import json
 import logging
 from typing import Dict, List, Optional
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
 class Client:
     def __init__(self, redis_url: str = None):
@@ -344,6 +345,90 @@ class Client:
         except Exception as e:
             self.logger.error(f"Failed to filter consumed posts for user {user_id}: {e}")
             return posts
+
+    def track_user_activity(self, user_id: str) -> bool:
+        """
+        Track user activity using Redis sorted set for efficient querying
+        
+        Args:
+            user_id: User identifier (DID)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            current_timestamp = time.time()
+            # Use the old redis-py 2.x syntax: zadd(key, member1, score1, member2, score2...)
+            result = self.client.zadd("user_activity", user_id, current_timestamp)
+            
+            # Clean up old activity (older than 30 days) periodically  
+            thirty_days_ago = current_timestamp - (30 * 24 * 60 * 60)
+            self.client.zremrangebyscore("user_activity", 0, thirty_days_ago)
+            
+            self.logger.debug(f"Tracked activity for user {user_id}")
+            return result is not None
+        except Exception as e:
+            self.logger.error(f"Failed to track activity for user {user_id}: {e}")
+            return False
+    
+    def is_new_user(self, user_id: str) -> bool:
+        """
+        Check if user is new (not in activity tracking)
+        
+        Args:
+            user_id: User identifier (DID)
+            
+        Returns:
+            True if user is new, False if already tracked
+        """
+        try:
+            score = self.client.zscore("user_activity", user_id)
+            is_new = score is None
+            self.logger.debug(f"User {user_id} is {'new' if is_new else 'existing'}")
+            return is_new
+        except Exception as e:
+            self.logger.error(f"Failed to check if user {user_id} is new: {e}")
+            return True  # Default to new user on error
+    
+    def get_active_users(self, days: int = 30) -> List[str]:
+        """
+        Get list of users active in the last N days
+        
+        Args:
+            days: Number of days to look back (default: 30)
+            
+        Returns:
+            List of user IDs active in the specified period
+        """
+        try:
+            cutoff_time = time.time() - (days * 24 * 60 * 60)
+            active_users = self.client.zrangebyscore("user_activity", cutoff_time, "+inf")
+            
+            self.logger.info(f"Found {len(active_users)} users active in last {days} days")
+            return active_users
+        except Exception as e:
+            self.logger.error(f"Failed to get active users: {e}")
+            return []
+    
+    def get_user_last_activity(self, user_id: str) -> Optional[datetime]:
+        """
+        Get last activity timestamp for a user
+        
+        Args:
+            user_id: User identifier (DID)
+            
+        Returns:
+            DateTime of last activity or None if not found
+        """
+        try:
+            timestamp = self.client.zscore("user_activity", user_id)
+            if timestamp is None:
+                return None
+            
+            return datetime.fromtimestamp(timestamp)
+        except Exception as e:
+            self.logger.error(f"Failed to get last activity for user {user_id}: {e}")
+            return None
 
     def get_stats(self) -> Dict:
         """Get cache statistics"""

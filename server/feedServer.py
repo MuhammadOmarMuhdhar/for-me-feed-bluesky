@@ -73,44 +73,25 @@ class FeedServer:
                 return None
         return self.bigquery_client
 
-    def log_request_to_bigquery(self, user_did: str, feed_uri: str):
-        """Log feed request directly to BigQuery for user discovery using UPSERT"""
-        logger.info(f"Starting log_request_to_bigquery for user {user_did}")
+    def log_new_user_to_bigquery(self, user_did: str, feed_uri: str):
+        """Log new user to BigQuery for discovery (called only once per user)"""
+        logger.info(f"Logging new user {user_did} to BigQuery")
         
         try:
-            logger.info(f"Getting BigQuery client...")
             bq_client = self.get_bigquery_client()
             if not bq_client:
-                logger.warning(f"BigQuery client not available, skipping request logging")
+                logger.warning(f"BigQuery client not available, skipping new user logging")
                 return
 
             current_time = datetime.utcnow()
-            logger.info(f"Building UPSERT query for {user_did} at {current_time.isoformat()}")
             
-            # UPSERT with parameterized query to prevent duplicates
+            # Simple INSERT for new users (no MERGE needed since we check Redis first)
             from google.cloud import bigquery
             
-            upsert_query = f"""
-            MERGE `{bq_client.project_id}.data.users` AS target
-            USING (
-                SELECT 
-                    @user_id AS user_id,
-                    @handle AS handle,
-                    @keywords AS keywords,
-                    @timestamp AS last_request_at,
-                    @request_count AS request_count,
-                    @timestamp AS created_at,
-                    @timestamp AS updated_at
-            ) AS source
-            ON target.user_id = source.user_id
-            WHEN MATCHED THEN
-                UPDATE SET
-                    last_request_at = source.last_request_at,
-                    request_count = target.request_count + 1,
-                    updated_at = source.updated_at
-            WHEN NOT MATCHED THEN
-                INSERT (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
-                VALUES (source.user_id, source.handle, source.keywords, source.last_request_at, source.request_count, source.created_at, source.updated_at)
+            insert_query = f"""
+            INSERT INTO `{bq_client.project_id}.data.users` 
+            (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
+            VALUES (@user_id, @handle, @keywords, @timestamp, @request_count, @timestamp, @timestamp)
             """
             
             job_config = bigquery.QueryJobConfig(
@@ -123,17 +104,31 @@ class FeedServer:
                 ]
             )
             
-            logger.info(f"Executing BigQuery UPSERT...")
-            query_job = bq_client.client.query(upsert_query, job_config=job_config)
+            logger.info(f"Executing BigQuery INSERT for new user...")
+            query_job = bq_client.client.query(insert_query, job_config=job_config)
             result = query_job.result()
-            logger.info(f"BigQuery query result: {result}")
-            logger.info(f"SUCCESS: Upserted user record for {user_did}")
+            logger.info(f"SUCCESS: Inserted new user record for {user_did}")
                 
         except Exception as e:
-            logger.error(f"FAILED to log request to BigQuery: {e}")
+            logger.error(f"FAILED to log new user to BigQuery: {e}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
             # Don't fail the request if logging fails
+
+    def handle_user_request(self, user_did: str, feed_uri: str):
+        """Handle user request with Redis activity tracking and new-user BigQuery logging"""
+        if not user_did:
+            return
+        
+        # Always track activity in Redis (fast, no duplicates possible)
+        self.redis_client.track_user_activity(user_did)
+        
+        # Only log new users to BigQuery (prevents duplicates and reduces load)
+        if self.redis_client.is_new_user(user_did):
+            logger.info(f"New user detected: {user_did}")
+            self.log_new_user_to_bigquery(user_did, feed_uri)
+        else:
+            logger.debug(f"Existing user activity tracked: {user_did}")
 
     def get_bluesky_client(self):
         """Get or create authenticated Bluesky client"""
@@ -234,10 +229,9 @@ class FeedServer:
                     cached_posts = self.redis_client.get_user_feed(user_did) or []
                 
                 if cached_posts:
-                    # EXISTING USER: Serve personalized feed, log request
+                    # EXISTING USER: Serve personalized feed, track activity
                     if user_did:
-                        logger.info(f"Logging request for existing user {user_did}")
-                        self.log_request_to_bigquery(user_did, feed)
+                        self.handle_user_request(user_did, feed)
                     logger.info(f"Retrieved {len(cached_posts)} personalized posts for user {user_did or 'anonymous'}")
                     
                     # Filter out posts user has already consumed to prevent duplicates
@@ -248,10 +242,9 @@ class FeedServer:
                     cached_posts = unconsumed_posts[:20]
                     
                 else:
-                    # POTENTIALLY NEW USER: Serve default feed, log request
+                    # POTENTIALLY NEW USER: Serve default feed, track activity and log if new
                     if user_did:
-                        logger.info(f"Logging request for new user {user_did}")
-                        self.log_request_to_bigquery(user_did, feed)
+                        self.handle_user_request(user_did, feed)
                     else:
                         logger.info("No user DID extracted from auth header")
                     
