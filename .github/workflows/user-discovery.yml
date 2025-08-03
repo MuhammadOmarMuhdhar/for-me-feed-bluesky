@@ -107,7 +107,7 @@ jobs:
               query = f'''
               SELECT COUNT(*) as recent_users 
               FROM \`{bq_client.project_id}.data.users\`
-              WHERE first_discovered_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+              WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
               '''
               result = bq_client.query(query)
               
