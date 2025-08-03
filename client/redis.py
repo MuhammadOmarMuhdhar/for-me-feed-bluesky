@@ -426,8 +426,8 @@ class Client:
         """
         try:
             current_timestamp = int(time.time())
-            # Use redis-py 2.x syntax: zadd(key, member, score)  
-            result = self.client.zadd("user_activity", user_id, current_timestamp)
+            # Use redis-py 5.x syntax: zadd(key, {member: score})
+            result = self.client.zadd("user_activity", {user_id: current_timestamp})
             
             # Clean up old activity (older than 30 days) periodically  
             thirty_days_ago = current_timestamp - (30 * 24 * 60 * 60)
