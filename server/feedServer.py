@@ -295,11 +295,16 @@ class FeedServer:
                     unconsumed_posts = self.redis_client.filter_unconsumed_posts(user_did, cached_posts)
                     consumed_posts = self.redis_client.get_consumed_posts_for_feed(user_did, cached_posts)
                     
-                    logger.info(f"Flowing feed: {len(unconsumed_posts)} unconsumed + {len(consumed_posts)} consumed posts")
-                    
-                    # Create flowing feed: 20 unconsumed posts + all consumed posts below
-                    flowing_feed = unconsumed_posts[:20] + consumed_posts
+                    # Create flowing feed with 100-post limit while preserving structure
+                    MAX_POSTS = 100
+                    unconsumed_limit = min(20, len(unconsumed_posts))
+                    remaining_slots = MAX_POSTS - unconsumed_limit
+
+                    # Take up to 20 unconsumed posts, then fill remaining slots with consumed posts
+                    flowing_feed = unconsumed_posts[:unconsumed_limit] + consumed_posts[:remaining_slots]
                     cached_posts = flowing_feed
+                    
+                    logger.info(f"Flowing feed: {len(unconsumed_posts[:unconsumed_limit])} unconsumed + {len(consumed_posts[:remaining_slots])} consumed = {len(flowing_feed)} total posts")
                     
                 else:
                     # POTENTIALLY NEW USER: Serve default feed, track activity and log if new
