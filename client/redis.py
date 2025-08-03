@@ -31,7 +31,7 @@ class Client:
     
     def set_user_feed(self, user_id: str, ranked_posts: List[Dict], ttl: int = 900) -> bool:
         """
-        Store ranked posts for a user with compression
+        Store ranked posts for a user without URI compression for performance
         
         Args:
             user_id: User identifier 
@@ -44,37 +44,36 @@ class Client:
         try:
             key = f"feed:{user_id}"
             
-            # Compress posts using short field names and URI hashing
-            compressed_posts = []
+            # Process posts without URI compression
+            processed_posts = []
+            
             for post in ranked_posts:
-                # Get URIs and compress them
                 post_uri = post.get('post_uri', '')
                 uri = post.get('uri', post_uri)  # Fallback to post_uri if uri missing
                 
                 if post_uri:
-                    compressed_post = {
-                        'u': self._store_uri_mapping(post_uri),  # post_uri -> u (compressed)
-                        'r': self._compress_uri(uri),  # uri -> r (reference, for consumption tracking)
-                        's': int(float(post.get('score', 0)) * 10000),  # score -> s (as integer)
-                        't': post.get('post_type', 'o')[:1],  # post_type -> t (first character)
-                        'f': 1 if post.get('followed_user') else 0  # followed_user -> f (boolean flag)
+                    processed_post = {
+                        'post_uri': post_uri,  # Store full URI directly
+                        'uri': uri,  # Store full URI directly
+                        'score': float(post.get('score', 0)),  # Keep as float
+                        'post_type': post.get('post_type', 'original'),  # Keep full string
+                        'followed_user': post.get('followed_user')  # Keep original value
                     }
-                    compressed_posts.append(compressed_post)
+                    processed_posts.append(processed_post)
             
-            # Store compressed data with metadata
+            # Store the feed data
             feed_data = {
-                'posts': compressed_posts,
+                'posts': processed_posts,
                 'updated_at': datetime.utcnow().isoformat(),
-                'count': len(compressed_posts)
+                'count': len(processed_posts)
             }
             
             json_data = json.dumps(feed_data, default=str)
-            result = self.client.set(key, json_data)
-            if result:
-                self.client.expire(key, ttl)
+            self.client.set(key, json_data)
+            self.client.expire(key, ttl)
             
-            self.logger.info(f"Stored compressed feed for user {user_id}: {len(compressed_posts)} posts")
-            return result
+            self.logger.info(f"Stored feed for user {user_id}: {len(processed_posts)} posts")
+            return True
             
         except Exception as e:
             self.logger.error(f"Failed to store feed for user {user_id}: {e}")
@@ -82,7 +81,7 @@ class Client:
     
     def get_user_feed(self, user_id: str) -> Optional[List[Dict]]:
         """
-        Retrieve and decompress ranked posts for a user
+        Retrieve ranked posts for a user
         
         Args:
             user_id: User identifier
@@ -99,27 +98,10 @@ class Client:
                 return None
             
             feed_data = json.loads(data)
-            compressed_posts = feed_data.get('posts', [])
+            posts = feed_data.get('posts', [])
             
-            # Decompress posts back to original format
-            decompressed_posts = []
-            for post in compressed_posts:
-                if isinstance(post, dict) and 'u' in post:
-                    # New compressed format
-                    decompressed_post = {
-                        'post_uri': self._decompress_uri(post['u']),
-                        'uri': self._decompress_uri(post.get('r', post['u'])),
-                        'score': float(post.get('s', 0)) / 10000,
-                        'post_type': 'repost' if post.get('t', 'o') == 'r' else 'original',
-                        'followed_user': 'placeholder' if post.get('f', 0) == 1 else None
-                    }
-                    decompressed_posts.append(decompressed_post)
-                else:
-                    # Fallback for old format
-                    decompressed_posts.append(post)
-            
-            self.logger.info(f"Retrieved and decompressed feed for user {user_id}: {len(decompressed_posts)} posts")
-            return decompressed_posts
+            self.logger.info(f"Retrieved feed for user {user_id}: {len(posts)} posts")
+            return posts
             
         except Exception as e:
             self.logger.error(f"Failed to retrieve feed for user {user_id}: {e}")
@@ -498,52 +480,6 @@ class Client:
             self.logger.error(f"Failed to get last activity for user {user_id}: {e}")
             return None
 
-    def _compress_uri(self, uri: str) -> str:
-        """
-        Compress URI to 8-character hash for memory efficiency
-        
-        Args:
-            uri: Full URI string
-            
-        Returns:
-            8-character hash of the URI
-        """
-        return hashlib.md5(uri.encode()).hexdigest()[:8]
-    
-    def _store_uri_mapping(self, uri: str) -> str:
-        """
-        Store URI mapping and return compressed hash
-        
-        Args:
-            uri: Full URI string
-            
-        Returns:
-            8-character hash that maps to the URI
-        """
-        uri_hash = self._compress_uri(uri)
-        # Store mapping with 24-hour TTL (longer than feed TTL)
-        # Use set + expire for compatibility with older redis-py
-        key = f"uri:{uri_hash}"
-        self.client.set(key, uri)
-        self.client.expire(key, 86400)
-        return uri_hash
-    
-    def _decompress_uri(self, uri_hash: str) -> str:
-        """
-        Decompress URI hash back to full URI
-        
-        Args:
-            uri_hash: 8-character hash
-            
-        Returns:
-            Full URI string or empty string if not found
-        """
-        try:
-            full_uri = self.client.get(f"uri:{uri_hash}")
-            return full_uri if full_uri else uri_hash  # Fallback to hash if not found
-        except Exception as e:
-            self.logger.error(f"Failed to decompress URI {uri_hash}: {e}")
-            return uri_hash
 
     def get_stats(self) -> Dict:
         """Get cache statistics"""
