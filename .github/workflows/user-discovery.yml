@@ -56,19 +56,11 @@ jobs:
               users_schema = [
                   bigquery.SchemaField('user_id', 'STRING', mode='REQUIRED'),
                   bigquery.SchemaField('handle', 'STRING'),
-                  bigquery.SchemaField('display_name', 'STRING'),
-                  bigquery.SchemaField('description', 'STRING'),
-                  bigquery.SchemaField('followers_count', 'INT64'),
-                  bigquery.SchemaField('following_count', 'INT64'),
-                  bigquery.SchemaField('posts_count', 'INT64'),
-                  bigquery.SchemaField('keywords', 'STRING', mode='REPEATED'),  # Array of keywords
-                  bigquery.SchemaField('is_active', 'BOOLEAN'),
-                  bigquery.SchemaField('discovered_via', 'STRING'),
-                  bigquery.SchemaField('first_discovered_at', 'TIMESTAMP'),
-                  bigquery.SchemaField('last_seen_at', 'TIMESTAMP'),
+                  bigquery.SchemaField('keywords', 'JSON'),  # JSON array of keywords
+                  bigquery.SchemaField('last_request_at', 'TIMESTAMP'),  # Feed request tracking
+                  bigquery.SchemaField('request_count', 'INT64'),  # Request count tracking
                   bigquery.SchemaField('created_at', 'TIMESTAMP'),
-                  bigquery.SchemaField('updated_at', 'TIMESTAMP'),
-                  bigquery.SchemaField('app_password', 'STRING')
+                  bigquery.SchemaField('updated_at', 'TIMESTAMP')
               ]
               
               table_ref = bq_client.client.dataset('data').table('users')

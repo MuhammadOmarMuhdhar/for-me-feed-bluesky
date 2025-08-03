@@ -87,23 +87,36 @@ class FeedServer:
             current_time = datetime.utcnow()
             logger.info(f"Building INSERT query for {user_did} at {current_time.isoformat()}")
             
-            # Simple INSERT - duplicates will be handled by ETL cleanup
+            # Simple INSERT with parameterized query for proper JSON handling
+            from google.cloud import bigquery
+            
             insert_query = f"""
             INSERT INTO `{bq_client.project_id}.data.users` 
             (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
             VALUES (
-                '{user_did}',
-                '',
-                JSON '[]',
-                TIMESTAMP('{current_time.isoformat()}'),
-                1,
-                TIMESTAMP('{current_time.isoformat()}'),
-                TIMESTAMP('{current_time.isoformat()}')
+                @user_id,
+                @handle,
+                @keywords,
+                @timestamp,
+                @request_count,
+                @timestamp,
+                @timestamp
             )
             """
             
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("user_id", "STRING", user_did),
+                    bigquery.ScalarQueryParameter("handle", "STRING", ''),
+                    bigquery.ScalarQueryParameter("keywords", "JSON", []),
+                    bigquery.ScalarQueryParameter("timestamp", "TIMESTAMP", current_time),
+                    bigquery.ScalarQueryParameter("request_count", "INTEGER", 1)
+                ]
+            )
+            
             logger.info(f"Executing BigQuery INSERT...")
-            result = bq_client.query(insert_query)
+            query_job = bq_client.client.query(insert_query, job_config=job_config)
+            result = query_job.result()
             logger.info(f"BigQuery query result: {result}")
             logger.info(f"SUCCESS: Inserted user record for {user_did}")
                 

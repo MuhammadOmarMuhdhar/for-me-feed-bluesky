@@ -52,29 +52,24 @@ def get_users_with_keywords_from_bigquery(bq_client: BigQueryClient, test_mode: 
 def get_user_keywords_as_terms(user_keywords) -> List[str]:
     """Convert stored keywords to term list for BM25"""
     try:
-        import json
         terms = []
         
-        # Handle JSON string from BigQuery
-        if isinstance(user_keywords, str):
-            keywords_list = json.loads(user_keywords)
-        elif isinstance(user_keywords, list):
+        # BigQuery JSON columns return as Python objects directly
+        if isinstance(user_keywords, list):
             keywords_list = user_keywords
+        elif user_keywords is None:
+            return []
         else:
             logger.warning(f"Unexpected keywords format: {type(user_keywords)}")
             return []
         
-        # Process keywords list
+        # Keywords are stored as simple string arrays
         for kw in keywords_list:
-            if isinstance(kw, dict) and 'keyword' in kw:
-                keyword = kw['keyword']
-                score = kw.get('score', 1.0)
-                # Add keyword multiple times based on score (weight)
-                weight = max(1, int(score * 5))  # Convert score to repeat count
-                terms.extend([keyword] * weight)
-            elif isinstance(kw, str):
-                # Simple string format
-                terms.append(kw)
+            if isinstance(kw, str):
+                # Simple string format - add multiple times for weighting
+                terms.extend([kw] * 3)  # Default weight of 3
+            else:
+                logger.warning(f"Unexpected keyword type: {type(kw)}")
         
         logger.info(f"Converted {len(set(terms))} unique keywords to {len(terms)} weighted terms")
         return terms

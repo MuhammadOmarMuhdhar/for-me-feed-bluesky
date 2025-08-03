@@ -186,19 +186,27 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
 def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, batch_id: str) -> bool:
     """Update existing user record with profile data in BigQuery"""
     try:
-        # Update the existing user record with profile information
-        import json
-        keywords_json = json.dumps(user_data['keywords']) if user_data['keywords'] else '[]'
+        from google.cloud import bigquery
         
+        # Use parameterized query to properly handle JSON
         update_query = f"""
         UPDATE `{bq_client.project_id}.data.users`
-        SET handle = '{user_data['handle']}',
-            keywords = '{keywords_json}',
-            updated_at = '{datetime.utcnow().isoformat()}'
-        WHERE user_id = '{user_data['user_id']}'
+        SET handle = @handle,
+            keywords = @keywords,
+            updated_at = CURRENT_TIMESTAMP()
+        WHERE user_id = @user_id
         """
         
-        bq_client.query(update_query)
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("handle", "STRING", user_data['handle']),
+                bigquery.ScalarQueryParameter("keywords", "JSON", user_data['keywords']),
+                bigquery.ScalarQueryParameter("user_id", "STRING", user_data['user_id'])
+            ]
+        )
+        
+        query_job = bq_client.client.query(update_query, job_config=job_config)
+        query_job.result()
         
         logger.info(f"Updated user profile for {user_data['handle']} in BigQuery")
         return True
