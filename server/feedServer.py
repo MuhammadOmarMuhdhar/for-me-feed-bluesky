@@ -288,12 +288,15 @@ class FeedServer:
                         self.handle_user_request(user_did, feed)
                     logger.info(f"Retrieved {len(cached_posts)} personalized posts for user {user_did or 'anonymous'}")
                     
-                    # Filter out posts user has already consumed to prevent duplicates
+                    # Get unconsumed posts (top 20) and consumed posts for flowing feed
                     unconsumed_posts = self.redis_client.filter_unconsumed_posts(user_did, cached_posts)
-                    logger.info(f"Filtered to {len(unconsumed_posts)} unconsumed posts for user {user_did}")
+                    consumed_posts = self.redis_client.get_consumed_posts_for_feed(user_did, cached_posts)
                     
-                    # Apply 20-post window to unconsumed posts
-                    cached_posts = unconsumed_posts[:20]
+                    logger.info(f"Flowing feed: {len(unconsumed_posts)} unconsumed + {len(consumed_posts)} consumed posts")
+                    
+                    # Create flowing feed: 20 unconsumed posts + all consumed posts below
+                    flowing_feed = unconsumed_posts[:20] + consumed_posts
+                    cached_posts = flowing_feed
                     
                 else:
                     # POTENTIALLY NEW USER: Serve default feed, track activity and log if new
@@ -333,8 +336,16 @@ class FeedServer:
                     
                     feed_items.append(feed_item)
                 
-                # Mark served posts as consumed to prevent future duplicates
-                if user_did and cached_posts:
+                # Mark only new unconsumed posts as consumed (don't re-mark already consumed posts)
+                if user_did and 'unconsumed_posts' in locals():
+                    new_posts_to_mark = unconsumed_posts[:20]  # Only the 20 new posts served
+                    if new_posts_to_mark:
+                        new_uris = [post.get("uri") for post in new_posts_to_mark if post.get("uri")]
+                        if new_uris:
+                            self.redis_client.mark_posts_consumed(user_did, new_uris)
+                            logger.debug(f"Marked {len(new_uris)} new posts as consumed for user {user_did}")
+                elif user_did and cached_posts:
+                    # Fallback for new users or when no personalized feed exists
                     served_uris = [post.get("uri") for post in cached_posts if post.get("uri")]
                     if served_uris:
                         self.redis_client.mark_posts_consumed(user_did, served_uris)

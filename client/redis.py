@@ -293,14 +293,14 @@ class Client:
             self.logger.error(f"Failed to get value for key {key}: {e}")
             return None
 
-    def mark_posts_consumed(self, user_id: str, post_uris: List[str], ttl: int = 21600) -> bool:
+    def mark_posts_consumed(self, user_id: str, post_uris: List[str], ttl: int = 10800) -> bool:
         """
-        Mark posts as consumed by a user with memory-optimized hashing (6 hour TTL)
+        Mark posts as consumed by a user with memory-optimized hashing (3 hour TTL)
         
         Args:
             user_id: User identifier
             post_uris: List of post URIs that were served to user
-            ttl: Time to live in seconds (default: 6 hours)
+            ttl: Time to live in seconds (default: 3 hours)
         
         Returns:
             True if successful, False otherwise
@@ -379,6 +379,40 @@ class Client:
         except Exception as e:
             self.logger.error(f"Failed to filter consumed posts for user {user_id}: {e}")
             return posts
+
+    def get_consumed_posts_for_feed(self, user_id: str, posts: List[Dict]) -> List[Dict]:
+        """
+        Get already consumed posts from the provided posts list, in original order
+        
+        Args:
+            user_id: User identifier
+            posts: List of post dictionaries with 'uri' key
+            
+        Returns:
+            List of consumed posts in original order
+        """
+        try:
+            consumed_hashes = self.get_consumed_posts(user_id)
+            
+            if not consumed_hashes:
+                return []
+            
+            consumed_posts = []
+            for post in posts:
+                uri = post.get('uri', '')
+                if uri:
+                    # Use 12-char hash for consumption tracking (more precision)
+                    uri_hash = hashlib.md5(uri.encode()).hexdigest()[:12]
+                    if uri_hash in consumed_hashes:
+                        consumed_posts.append(post)
+            
+            if consumed_posts:
+                self.logger.info(f"Found {len(consumed_posts)} consumed posts for flowing feed")
+            
+            return consumed_posts
+        except Exception as e:
+            self.logger.error(f"Failed to get consumed posts for user {user_id}: {e}")
+            return []
 
     def track_user_activity(self, user_id: str) -> bool:
         """
