@@ -425,8 +425,8 @@ class Client:
             True if successful, False otherwise
         """
         try:
-            current_timestamp = time.time()
-            # Use the old redis-py 2.x syntax: zadd(key, member1, score1, member2, score2...)
+            current_timestamp = int(time.time())
+            # Use redis-py 2.x syntax: zadd(key, member, score)  
             result = self.client.zadd("user_activity", user_id, current_timestamp)
             
             # Clean up old activity (older than 30 days) periodically  
