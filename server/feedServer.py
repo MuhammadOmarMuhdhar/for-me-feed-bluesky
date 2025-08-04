@@ -277,12 +277,8 @@ class FeedServer:
                         
                     feed_item = {"post": post["uri"]}
                     
-                    # Add repost information if this is a repost
-                    if post.get('post_type') == 'repost' and post.get('followed_user'):
-                        feed_item["reason"] = {
-                            "type": "repost",
-                            "by": post.get('followed_user')
-                        }
+                    # TODO: Add repost reasons later with proper AT-URIs
+                    # Temporarily removed to fix schema validation errors
                     
                     feed_items.append(feed_item)
                 
