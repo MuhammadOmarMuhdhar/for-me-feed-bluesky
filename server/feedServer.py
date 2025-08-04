@@ -91,11 +91,21 @@ class FeedServer:
             # MERGE is more efficient and avoids temporary table creation
             insert_query = f"""
             MERGE `{bq_client.project_id}.data.users` AS target
-            USING (SELECT @user_id as user_id) AS source
+            USING (
+                SELECT 
+                    @user_id AS user_id,
+                    @handle AS handle,
+                    @keywords AS keywords,
+                    @embeddings as embeddings,
+                    @timestamp AS last_request_at,
+                    @request_count AS request_count,
+                    @timestamp AS created_at,
+                    @timestamp AS updated_at
+            ) AS source
             ON target.user_id = source.user_id
             WHEN NOT MATCHED THEN
-              INSERT (user_id, handle, keywords, embeddings, last_request_at, request_count, created_at, updated_at)
-              VALUES (@user_id, @handle, @keywords, @embeddings, @timestamp, @request_count, @timestamp, @timestamp)
+                INSERT (user_id, handle, keywords, embeddings, last_request_at, request_count, created_at, updated_at)
+                VALUES (source.user_id, source.handle, source.keywords, source.embeddings, source.last_request_at, source.request_count, source.created_at, source.updated_at)
             """
             
             job_config = bigquery.QueryJobConfig(
@@ -103,7 +113,7 @@ class FeedServer:
                     bigquery.ScalarQueryParameter("user_id", "STRING", user_did),
                     bigquery.ScalarQueryParameter("handle", "STRING", ''),
                     bigquery.ScalarQueryParameter("keywords", "JSON", []),
-                    bigquery.ScalarQueryParameter("embeddings", "JSON", None),
+                    bigquery.ScalarQueryParameter("embeddings", "JSON", []),
                     bigquery.ScalarQueryParameter("timestamp", "TIMESTAMP", current_time),
                     bigquery.ScalarQueryParameter("request_count", "INTEGER", 1)
                 ]
