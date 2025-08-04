@@ -85,19 +85,17 @@ class FeedServer:
 
             current_time = datetime.utcnow()
             
-            # INSERT with duplicate protection (handles any remaining race conditions)
+            # Use MERGE for atomic upsert operation (prevents duplicates efficiently)
             from google.cloud import bigquery
             
-            # Use INSERT with duplicate protection (correct BigQuery syntax with dummy FROM)
+            # MERGE is more efficient and avoids temporary table creation
             insert_query = f"""
-            INSERT INTO `{bq_client.project_id}.data.users` 
-            (user_id, handle, keywords, embeddings, last_request_at, request_count, created_at, updated_at)
-            SELECT @user_id, @handle, @keywords, @embeddings, @timestamp, @request_count, @timestamp, @timestamp
-            FROM (SELECT 1) AS dummy
-            WHERE NOT EXISTS (
-                SELECT 1 FROM `{bq_client.project_id}.data.users` 
-                WHERE user_id = @user_id
-            )
+            MERGE `{bq_client.project_id}.data.users` AS target
+            USING (SELECT @user_id as user_id) AS source
+            ON target.user_id = source.user_id
+            WHEN NOT MATCHED THEN
+              INSERT (user_id, handle, keywords, embeddings, last_request_at, request_count, created_at, updated_at)
+              VALUES (@user_id, @handle, @keywords, @embeddings, @timestamp, @request_count, @timestamp, @timestamp)
             """
             
             job_config = bigquery.QueryJobConfig(
