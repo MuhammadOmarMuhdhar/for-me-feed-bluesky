@@ -3,8 +3,9 @@ import sys
 import argparse
 import json
 import logging
+import numpy as np
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,6 +14,9 @@ from client.bluesky.newPosts import Client as BlueskyClient
 from client.bigQuery import Client as BigQueryClient
 from client.redis import Client as RedisClient
 from ranking.bm25Similarity import compute_bm25_similarity
+from ranking.cosineSimilarity import compute_user_feed_similarity
+from datetime import datetime, timezone
+from dateutil import parser
 
 # Configure logging
 logging.basicConfig(
@@ -92,6 +96,157 @@ def get_users_with_keywords_from_bigquery_fallback(bq_client: BigQueryClient, te
         logger.warning(f"Could not get users from BigQuery: {e}")
         return []
 
+def get_post_age_days(post: Dict) -> int:
+    """
+    Calculate the age of a post in days
+    
+    Args:
+        post: Post dictionary with createdAt or indexed_at field
+        
+    Returns:
+        Age in days, or 0 if date cannot be parsed
+    """
+    try:
+        # Try different timestamp fields
+        timestamp_str = None
+        for field in ['createdAt', 'indexed_at', 'created_at', 'indexedAt']:
+            if field in post:
+                timestamp_str = post[field]
+                break
+        
+        if not timestamp_str:
+            return 0
+        
+        # Parse timestamp
+        if isinstance(timestamp_str, str):
+            post_time = parser.parse(timestamp_str)
+        else:
+            return 0
+        
+        # Calculate age in days
+        now = datetime.now(timezone.utc)
+        if post_time.tzinfo is None:
+            post_time = post_time.replace(tzinfo=timezone.utc)
+        
+        age_delta = now - post_time
+        return age_delta.days
+        
+    except Exception as e:
+        logger.debug(f"Could not parse post date: {e}")
+        return 0
+
+
+def is_faq_post(post: Dict, position: int) -> bool:
+    """
+    Determine if a post is likely a FAQ/instructional post
+    
+    Args:
+        post: Post dictionary
+        position: Position in the feed (0-indexed)
+        
+    Returns:
+        True if post should be filtered as FAQ
+    """
+    # Filter 1: Position + Age - Skip first 2 posts if they're >5 days old
+    if position < 2:
+        post_age = get_post_age_days(post)
+        if post_age > 5:
+            logger.debug(f"Filtering FAQ: position {position}, age {post_age} days")
+            return True
+    
+    # Filter 2: Keyword pattern matching
+    text = post.get('text', '').lower()
+    if not text:
+        return False
+    
+    faq_keywords = [
+        "faq", "frequently asked", "welcome to", "how to use",
+        "getting started", "please read", "rules", "guidelines", 
+        "this feed", "submit to", "curated by", "about this feed",
+        "before posting", "read first", "pinned", "instructions",
+        "how this works", "feed description", "what is this feed"
+    ]
+    
+    for keyword in faq_keywords:
+        if keyword in text:
+            logger.debug(f"Filtering FAQ: keyword '{keyword}' found")
+            return True
+    
+    return False
+
+
+def filter_faq_posts(posts: List[Dict]) -> List[Dict]:
+    """
+    Filter out FAQ and instructional posts from a list
+    
+    Args:
+        posts: List of posts from a feed
+        
+    Returns:
+        Filtered list with FAQ posts removed
+    """
+    filtered_posts = []
+    faq_count = 0
+    
+    for i, post in enumerate(posts):
+        if is_faq_post(post, position=i):
+            faq_count += 1
+            continue
+        filtered_posts.append(post)
+    
+    if faq_count > 0:
+        logger.info(f"Filtered {faq_count} FAQ posts from {len(posts)} total posts")
+    
+    return filtered_posts
+
+
+def get_user_embeddings(user_id: str, bq_client: BigQueryClient) -> Optional[np.ndarray]:
+    """
+    Retrieve user embeddings from BigQuery users table
+    
+    Args:
+        user_id: User's DID
+        bq_client: BigQuery client instance
+        
+    Returns:
+        User embedding as numpy array, or None if not found
+    """
+    try:
+        query = f"""
+        SELECT embeddings
+        FROM `{bq_client.project_id}.data.users`
+        WHERE user_id = '{user_id}'
+        AND embeddings IS NOT NULL
+        LIMIT 1
+        """
+        
+        result = bq_client.query(query)
+        
+        if result.empty:
+            logger.warning(f"No embeddings found for user {user_id}")
+            return None
+        
+        embeddings_data = result.iloc[0]['embeddings']
+        
+        # Parse JSON embeddings
+        if isinstance(embeddings_data, str):
+            embeddings = json.loads(embeddings_data)
+        else:
+            embeddings = embeddings_data
+        
+        if not embeddings or not isinstance(embeddings, list):
+            logger.warning(f"Invalid embeddings format for user {user_id}")
+            return None
+        
+        embeddings_array = np.array(embeddings)
+        logger.info(f"Retrieved embeddings for user {user_id}: shape {embeddings_array.shape}")
+        return embeddings_array
+        
+    except Exception as e:
+        logger.error(f"Failed to retrieve embeddings for user {user_id}: {e}")
+        return None
+
+
 def get_user_keywords_as_terms(user_keywords) -> List[str]:
     """Convert stored keywords to term list for BM25"""
     try:
@@ -128,6 +283,151 @@ def get_user_keywords_as_terms(user_keywords) -> List[str]:
     except Exception as e:
         logger.error(f"Failed to process user keywords: {e}")
         return []
+
+def collect_comprehensive_posts(
+    user_embeddings: Optional[np.ndarray],
+    user_keywords: List[str], 
+    user_did: str,
+    bq_client: BigQueryClient
+) -> List[Dict]:
+    """
+    Collect posts from three sources: matching feeds, following network, and keyword/trending
+    
+    Args:
+        user_embeddings: User's embedding vector for feed matching
+        user_keywords: User's keywords for search-based collection
+        user_did: User's DID for network posts
+        bq_client: BigQuery client for feed matching
+        
+    Returns:
+        List of posts from all sources with source tagging
+    """
+    all_posts = []
+    
+    try:
+        posts_client = BlueskyClient()
+        posts_client.login()
+        
+        # 1. Get posts from matching feeds (if user has embeddings)
+        if user_embeddings is not None:
+            try:
+                logger.info("Collecting posts from matching feeds...")
+                matching_feeds = compute_user_feed_similarity(
+                    user_embeddings=user_embeddings.tolist(),
+                    bq_client=bq_client,
+                    threshold=0.4
+                )
+                
+                feed_posts = []
+                for feed_match in matching_feeds[:10]:  # Limit to top 10 feeds
+                    try:
+                        posts = posts_client.extract_posts_from_feed(
+                            feed_url_or_uri=feed_match['feed_uri'],
+                            limit=100
+                        )
+                        
+                        # Filter FAQ posts before processing
+                        posts = filter_faq_posts(posts)
+                        
+                        # Tag posts with feed info
+                        for post in posts:
+                            post['source'] = 'feed'
+                            post['feed_similarity'] = feed_match['similarity_score']
+                            post['feed_uri'] = feed_match['feed_uri']
+                        
+                        feed_posts.extend(posts)
+                        logger.info(f"Collected {len(posts)} posts from feed: {feed_match['feed_uri']}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to collect from feed {feed_match['feed_uri']}: {e}")
+                        continue
+                
+                all_posts.extend(feed_posts)
+                logger.info(f"Total feed posts collected: {len(feed_posts)}")
+                
+            except Exception as e:
+                logger.error(f"Failed to collect feed posts: {e}")
+        else:
+            logger.info("No user embeddings available, skipping feed-based collection")
+        
+        # 2. Get posts from following network
+        try:
+            logger.info("Collecting posts from following network...")
+            from client.bluesky.userData import Client as UserDataClient
+            user_client = UserDataClient()
+            user_client.login()
+            
+            # Get following list
+            following_data = user_client.get_all_user_follows(user_did)
+            following_list = following_data if following_data else []
+            
+            if following_list:
+                network_posts = posts_client.get_following_timeline(
+                    following_list=following_list,
+                    target_count=200,
+                    time_hours=6,
+                    include_reposts=True,
+                    repost_weight=0.5
+                )
+                
+                # Tag network posts
+                for post in network_posts:
+                    post['source'] = 'network'
+                    post['from_network'] = True
+                
+                all_posts.extend(network_posts)
+                logger.info(f"Collected {len(network_posts)} network posts")
+            else:
+                logger.warning("No following list found for network posts")
+                
+        except Exception as e:
+            logger.error(f"Failed to collect network posts: {e}")
+        
+        # 3. Get keyword/trending posts for discovery
+        try:
+            logger.info("Collecting keyword/trending posts...")
+            
+            # Use user keywords if available
+            if user_keywords:
+                keyword_posts = posts_client.get_posts_with_user_keywords(
+                    user_keywords=user_keywords[:10],  # Limit to top 10 keywords
+                    target_count=100,
+                    generic_ratio=0.3  # 30% generic trending posts
+                )
+            else:
+                # Fallback to trending posts
+                keyword_posts = posts_client.get_top_posts_multiple_queries(
+                    queries=["the", "a", "I", "you", "this", "today", "new", "just"],
+                    target_count=100,
+                    time_hours=12
+                )
+            
+            # Tag keyword posts
+            for post in keyword_posts:
+                post['source'] = 'keyword'
+                post['from_trending'] = True
+            
+            all_posts.extend(keyword_posts)
+            logger.info(f"Collected {len(keyword_posts)} keyword/trending posts")
+            
+        except Exception as e:
+            logger.error(f"Failed to collect keyword posts: {e}")
+        
+        # Log collection summary
+        source_counts = {}
+        for post in all_posts:
+            source = post.get('source', 'unknown')
+            source_counts[source] = source_counts.get(source, 0) + 1
+        
+        logger.info(f"Comprehensive collection complete: {len(all_posts)} total posts")
+        logger.info(f"Source breakdown: {source_counts}")
+        
+        return all_posts
+        
+    except Exception as e:
+        logger.error(f"Failed comprehensive post collection: {e}")
+        return []
+
 
 def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> List[Dict]:
     """Collect posts to rank using hybrid system with following network"""
@@ -266,8 +566,66 @@ def filter_blocked_posts(posts: List[Dict], blocked_users: set) -> List[Dict]:
     
     return filtered_posts
 
+def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
+    """Calculate BM25 rankings with feed similarity boosting and combined scoring"""
+    try:
+        if not user_terms:
+            logger.warning("No user terms provided for ranking")
+            return []
+        
+        # Load blocked users and filter posts before ranking
+        blocked_users = load_blocked_users()
+        filtered_posts = filter_blocked_posts(posts, blocked_users)
+        
+        if len(filtered_posts) < len(posts):
+            logger.info(f"Moderation filtering: {len(posts)} -> {len(filtered_posts)} posts")
+        
+        # Calculate BM25 similarity using stored keywords on filtered posts
+        ranked_posts = compute_bm25_similarity(user_terms, filtered_posts)
+        
+        # Apply feed similarity boosting and create final scores
+        for post in ranked_posts:
+            bm25_score = post.get('bm25_score', 0)
+            source = post.get('source', 'unknown')
+            
+            # Calculate feed boost
+            if source == 'feed':
+                feed_similarity = post.get('feed_similarity', 0)
+                # Convert similarity (0.7-1.0) to boost factor (1.7-2.8)
+                feed_boost = 1.0 + (feed_similarity * 2.0)
+                post['feed_boost'] = feed_boost
+            else:
+                feed_boost = 1.0
+                post['feed_boost'] = feed_boost
+            
+            # Apply boost to create final score
+            final_score = bm25_score * feed_boost
+            post['final_score'] = final_score
+        
+        # Sort by final score (BM25 * feed_boost)
+        ranked_posts = sorted(ranked_posts, key=lambda x: x.get('final_score', 0), reverse=True)
+        
+        # Log scoring statistics
+        feed_posts = [p for p in ranked_posts if p.get('source') == 'feed']
+        network_posts = [p for p in ranked_posts if p.get('source') == 'network']
+        keyword_posts = [p for p in ranked_posts if p.get('source') == 'keyword']
+        
+        logger.info(f"Calculated rankings for {len(ranked_posts)} posts using {len(set(user_terms))} unique keywords")
+        logger.info(f"Source distribution: {len(feed_posts)} feed, {len(network_posts)} network, {len(keyword_posts)} keyword")
+        
+        if feed_posts:
+            avg_feed_boost = sum(p.get('feed_boost', 1.0) for p in feed_posts) / len(feed_posts)
+            logger.info(f"Average feed boost factor: {avg_feed_boost:.2f}x")
+        
+        return ranked_posts
+        
+    except Exception as e:
+        logger.error(f"Failed to calculate rankings: {e}")
+        return []
+
+
 def calculate_rankings(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
-    """Calculate TF-IDF/BM25 rankings using pre-stored keywords"""
+    """Calculate TF-IDF/BM25 rankings using pre-stored keywords (legacy function)"""
     try:
         if not user_terms:
             logger.warning("No user terms provided for ranking")
@@ -292,6 +650,84 @@ def calculate_rankings(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
     except Exception as e:
         logger.error(f"Failed to calculate rankings: {e}")
         return []
+
+def distribute_network_posts(ranked_posts: List[Dict], target_network_ratio: float = 0.3) -> List[Dict]:
+    """
+    Distribute network posts evenly throughout the ranked feed instead of clustering at top
+    
+    Args:
+        ranked_posts: List of posts with BM25 scores and source tags
+        target_network_ratio: Target percentage of network posts in feed (default 30%)
+        
+    Returns:
+        Posts with network posts distributed evenly throughout
+    """
+    try:
+        # Separate posts by source
+        network_posts = [p for p in ranked_posts if p.get('from_network', False)]
+        other_posts = [p for p in ranked_posts if not p.get('from_network', False)]
+        
+        if not network_posts:
+            logger.info("No network posts to distribute")
+            return ranked_posts
+        
+        # Sort both groups by final score (descending)
+        network_posts.sort(key=lambda x: x.get('final_score', x.get('bm25_score', 0)), reverse=True)
+        other_posts.sort(key=lambda x: x.get('final_score', x.get('bm25_score', 0)), reverse=True)
+        
+        total_positions = len(ranked_posts)
+        target_network_count = min(len(network_posts), int(total_positions * target_network_ratio))
+        
+        if target_network_count == 0:
+            return other_posts
+        
+        # Calculate distribution interval
+        interval = total_positions // target_network_count if target_network_count > 0 else total_positions
+        
+        # Distribute network posts evenly
+        final_feed = []
+        network_index = 0
+        other_index = 0
+        
+        for position in range(total_positions):
+            # Insert network post at regular intervals
+            if (position % interval == 0 and 
+                network_index < target_network_count and 
+                network_index < len(network_posts)):
+                final_feed.append(network_posts[network_index])
+                network_index += 1
+            # Fill remaining positions with other posts
+            elif other_index < len(other_posts):
+                final_feed.append(other_posts[other_index])
+                other_index += 1
+            # If we run out of other posts, add remaining network posts
+            elif network_index < len(network_posts):
+                final_feed.append(network_posts[network_index])
+                network_index += 1
+        
+        # Add any remaining posts that didn't fit
+        while other_index < len(other_posts):
+            final_feed.append(other_posts[other_index])
+            other_index += 1
+        
+        while network_index < len(network_posts):
+            final_feed.append(network_posts[network_index])
+            network_index += 1
+        
+        # Log distribution stats
+        network_in_top_50 = sum(1 for post in final_feed[:50] if post.get('from_network', False))
+        network_in_final = sum(1 for post in final_feed if post.get('from_network', False))
+        
+        logger.info(f"Network distribution: {network_in_final} network posts distributed evenly")
+        logger.info(f"Network in top 50: {network_in_top_50} posts ({network_in_top_50/min(50, len(final_feed))*100:.1f}%)")
+        logger.info(f"Target ratio achieved: {network_in_final/len(final_feed)*100:.1f}% (target: {target_network_ratio*100:.1f}%)")
+        
+        return final_feed
+        
+    except Exception as e:
+        logger.error(f"Failed to distribute network posts: {e}")
+        return ranked_posts
+
 
 def boost_network_posts(ranked_posts: List[Dict], user_did: str) -> List[Dict]:
     """
@@ -519,38 +955,60 @@ def main():
             try:
                 logger.info(f"Processing user: {user_handle}")
                 
-                # Step 1: Get stored keywords and convert to terms
-                user_keywords = user.get('keywords')  # Don't default to []
+                # Step 1: Get user embeddings and keywords
+                user_embeddings = get_user_embeddings(user_id, bq_client)
+                user_keywords = user.get('keywords')
                 user_terms = get_user_keywords_as_terms(user_keywords)
                 
-                if not user_terms:
-                    logger.warning(f"No keywords found for {user_handle}, skipping")
+                if not user_terms and user_embeddings is None:
+                    logger.warning(f"No keywords or embeddings found for {user_handle}, skipping")
                     continue
                 
-                # Step 2: Collect posts to rank (using keywords + following network)
-                posts_to_rank = collect_posts_to_rank(user_terms, user_id)
+                # Step 2: Comprehensive post collection (feeds + network + keywords)
+                posts_to_rank = collect_comprehensive_posts(
+                    user_embeddings=user_embeddings,
+                    user_keywords=user_terms,
+                    user_did=user_id,
+                    bq_client=bq_client
+                )
                 
                 if not posts_to_rank:
-                    logger.warning(f"No posts to rank for {user_handle}, skipping")
+                    logger.warning(f"No posts collected for {user_handle}, skipping")
                     continue
                 
-                # Step 3: Calculate rankings using stored keywords
-                ranked_posts = calculate_rankings(user_terms, posts_to_rank)
+                # Step 3: Calculate rankings with feed boosting
+                if user_terms:
+                    ranked_posts = calculate_rankings_with_feed_boosting(user_terms, posts_to_rank)
+                else:
+                    # Fallback for users with embeddings but no keywords
+                    logger.info(f"No keywords for {user_handle}, using basic scoring")
+                    for post in posts_to_rank:
+                        post['bm25_score'] = 1.0  # Base score
+                        source = post.get('source', 'unknown')
+                        if source == 'feed':
+                            feed_similarity = post.get('feed_similarity', 0)
+                            feed_boost = 1.0 + (feed_similarity * 2.0)
+                            post['final_score'] = 1.0 * feed_boost
+                        else:
+                            post['final_score'] = 1.0
+                    ranked_posts = sorted(posts_to_rank, key=lambda x: x.get('final_score', 0), reverse=True)
                 
                 if not ranked_posts:
                     logger.warning(f"No rankings calculated for {user_handle}, skipping")
                     continue
                 
-                # Step 3.5: Boost network posts to ensure visibility
-                ranked_posts = boost_network_posts(ranked_posts, user_id)
-                logger.info(f"Applied network visibility boost for user {user_handle}")
+                # Step 4: Distribute network posts evenly throughout feed
+                ranked_posts = distribute_network_posts(ranked_posts, target_network_ratio=0.3)
+                logger.info(f"Applied network post distribution for user {user_handle}")
                 
-                # Step 4: Cache results
+                # Step 5: Cache results
                 cache_success = cache_user_rankings(redis_client, user_id, ranked_posts)
                 
                 if cache_success:
                     success_count += 1
-                    logger.info(f"Successfully processed {user_handle} with {len(user_terms)} keywords")
+                    embeddings_status = "with embeddings" if user_embeddings is not None else "no embeddings"
+                    keywords_count = len(user_terms) if user_terms else 0
+                    logger.info(f"Successfully processed {user_handle} ({embeddings_status}, {keywords_count} keywords)")
                 else:
                     error_count += 1
                     logger.error(f"Failed to cache results for {user_handle}")
@@ -574,7 +1032,7 @@ def main():
         cached_users = redis_client.get_cached_users()
         logger.info(f"Redis Stats: {stats}")
         logger.info(f"Total cached feeds: {len(cached_users)}")
-        logger.info(f"ETL Performance: No user data collection, used pre-stored keywords only")
+        logger.info(f"ETL Performance: Comprehensive collection (feeds + network + keywords) with embedding-based feed filtering")
         
     except Exception as e:
         logger.error(f"ETL failed with error: {e}")
