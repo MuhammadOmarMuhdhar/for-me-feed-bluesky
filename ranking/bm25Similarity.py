@@ -24,10 +24,10 @@ def build_user_query_terms(user_data: Dict) -> List[str]:
     
     # Extract terms with weights
     content_types = [
-        ('posts', 2),     # Posts weight: 2
-        ('reposts', 3),   # Reposts weight: 3 (highest)
-        ('replies', 1.5), # Replies weight: 1.5
-        ('likes', 1)      # Likes weight: 1
+        ('posts', 2),     
+        ('reposts', 3),   
+        ('replies', 1.5), 
+        ('likes', 3)     
     ]
     
     for content_type, weight in content_types:
@@ -176,27 +176,3 @@ def compute_bm25_from_user_data(user_data: Dict, posts_with_text: List[Dict], k1
     # Compute BM25 similarity
     return compute_bm25_similarity(query_terms, posts_with_text, k1, b)
 
-
-if __name__ == "__main__":
-    # Example usage
-    user_data = {
-        'posts': [{'text': 'I love machine learning and AI'}],
-        'reposts': [{'text': 'Great paper on neural networks'}],
-        'replies': [{'text': 'Fascinating AI research'}],
-        'likes': []
-    }
-    
-    posts = [
-        {'text': 'New breakthrough in AI and machine learning', 'author': {'handle': 'ai_researcher'}},
-        {'text': 'Beautiful sunset today', 'author': {'handle': 'photographer'}},
-        {'text': 'Deep learning neural networks are amazing', 'author': {'handle': 'ml_expert'}}
-    ]
-    
-    posts_with_scores = compute_bm25_from_user_data(user_data, posts)
-    
-    # Sort by BM25 score to see results
-    sorted_posts = sorted(posts_with_scores, key=lambda x: x.get('bm25_score', 0), reverse=True)
-    
-    print("\nTop posts by BM25 score:")
-    for i, post in enumerate(sorted_posts[:3]):
-        print(f"{i+1}. Score: {post.get('bm25_score', 0):.3f} - {post.get('text', '')[:50]}...")

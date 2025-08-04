@@ -521,7 +521,7 @@ class Client:
             print(f"Error in personalized collection: {e}")
             print("Falling back to generic collection")
             return self.get_top_posts_multiple_queries(target_count=target_count, time_hours=time_hours)
-    
+
     async def connect_to_jetstream(
         self,
         websocket_url: str = "wss://jetstream1.us-east.bsky.network/subscribe",
@@ -569,6 +569,126 @@ class Client:
         except Exception as e:
             print(f"WebSocket connection error: {e}")
     
+    
+    def extract_posts_from_feed(
+        self, 
+        feed_url_or_uri: str = None,
+        query: str = "python", 
+        limit: int = 25, 
+        sort: str = "top",
+        ranking: bool = False
+    ) -> List[Dict]:
+        """
+        Extract posts from a Bluesky feed (custom feed or search)
+        
+        Args:
+            feed_url_or_uri: Custom feed URL or AT-URI (if provided, uses getFeed)
+            query: Search term (used if no feed_url_or_uri provided)
+            limit: Number of posts to return (max 100)
+            sort: Sort order for search ('top' or 'latest')
+        
+        Returns:
+            List of post dictionaries
+        """
+        try:
+            # If feed URL/URI provided, use getFeed API
+            if feed_url_or_uri:
+                return self._extract_from_custom_feed(feed_url_or_uri, limit)
+            
+            # Otherwise use search API
+            params = {
+                'q': query,
+                'sort': sort,
+                'limit': min(limit, 100)
+            }
+            
+            response = self.client.app.bsky.feed.search_posts(params)
+            posts = []
+            
+            for post in response.posts:
+                post_data = {
+                    'uri': post.uri,
+                    'author_handle': post.author.handle,
+                    'author_display_name': getattr(post.author, 'display_name', ''),
+                    'text': post.record.text,
+                    'created_at': post.record.created_at,
+                    'like_count': getattr(post, 'like_count', 0),
+                    'repost_count': getattr(post, 'repost_count', 0),
+                    'reply_count': getattr(post, 'reply_count', 0)
+                }
+                if ranking and post_data['like_count'] > 10:
+                    posts.append(post_data)
+                else:
+                    posts.append(post_data)
+                                
+            return posts
+            
+        except Exception as e:
+            print(f"Error extracting posts: {e}")
+            return []
+    
+    def _extract_from_custom_feed(self, 
+                                  feed_url_or_uri: str, 
+                                  limit: int, 
+                                  ranking: bool = False) -> List[Dict]:
+        """Extract posts from a custom feed using getFeed API"""
+        try:
+            # Convert URL to AT-URI if needed
+            feed_uri = self._convert_feed_url_to_uri(feed_url_or_uri)
+            
+            params = {
+                'feed': feed_uri,
+                'limit': min(limit, 100)
+            }
+            
+            response = self.client.app.bsky.feed.get_feed(params)
+            posts = []
+            
+            for feed_item in response.feed:
+                post = feed_item.post
+                post_data = {
+                    'uri': post.uri,
+                    'author_handle': post.author.handle,
+                    'author_display_name': getattr(post.author, 'display_name', ''),
+                    'text': post.record.text,
+                    'created_at': post.record.created_at,
+                    'like_count': getattr(post, 'like_count', 0),
+                    'repost_count': getattr(post, 'repost_count', 0),
+                    'reply_count': getattr(post, 'reply_count', 0)
+                }
+                if ranking and post_data['like_count'] > 10:
+                    posts.append(post_data)
+                else:
+                    posts.append(post_data)
+                    
+            return posts
+            
+        except Exception as e:
+            print(f"Error extracting from custom feed: {e}")
+            return []
+    
+    def _convert_feed_url_to_uri(self, feed_url_or_uri: str) -> str:
+        """Convert feed URL to AT-URI format"""
+        if feed_url_or_uri.startswith('at://'):
+            return feed_url_or_uri
+        
+        # Extract components from URL like: https://bsky.app/profile/bossett.social/feed/for-science
+        if 'bsky.app/profile/' in feed_url_or_uri and '/feed/' in feed_url_or_uri:
+            parts = feed_url_or_uri.split('/')
+            handle = parts[parts.index('profile') + 1]
+            feed_id = parts[parts.index('feed') + 1]
+            
+            # For now, we need to resolve the handle to DID
+            # This is a simplified approach - in production you'd want to resolve the handle properly
+            try:
+                profile = self.client.app.bsky.actor.get_profile({'actor': handle})
+                did = profile.did
+                return f"at://{did}/app.bsky.feed.generator/{feed_id}"
+            except Exception as e:
+                print(f"Error resolving handle to DID: {e}")
+                raise
+        
+        return feed_url_or_uri
     
     def _build_query_string(self, params: Dict) -> str:
         """Build query string from parameters"""

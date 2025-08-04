@@ -306,6 +306,30 @@ class Client:
         except Exception as e:
             self.logger.error(f"Failed to get active users: {e}")
             return []
+    
+    def delete_user_feed(self, user_id: str) -> bool:
+        """Delete cached feed for a user"""
+        try:
+            key = f"feed:{user_id}"
+            result = self.client.delete(key)
+            self.logger.info(f"Deleted feed cache for user {user_id}")
+            return bool(result)
+        except Exception as e:
+            self.logger.error(f"Failed to delete feed for user {user_id}: {e}")
+            return False
+        
+    def clear_all_feeds(self) -> bool:
+        """Clear all cached feeds (for maintenance)"""
+        try:
+            keys = self.client.keys("feed:*")
+            if keys:
+                result = self.client.delete(*keys)
+                self.logger.info(f"Cleared {result} cached feeds")
+                return True
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to clear feeds: {e}")
+            return False
 
     def get_stats(self) -> Dict:
         """Get cache statistics"""
