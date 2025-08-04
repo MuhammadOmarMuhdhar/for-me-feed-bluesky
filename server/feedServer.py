@@ -203,56 +203,6 @@ class FeedServer:
                 return None
         return self.bluesky_client
 
-    def get_trending_posts(self) -> List[Dict]:
-        """Get trending posts with Redis caching"""
-        try:
-            # Check Redis cache first
-            cached_trending = self.redis_client.get_trending_posts()
-            if cached_trending:
-                logger.info(f"Retrieved {len(cached_trending)} trending posts from cache")
-                return cached_trending
-
-            # Cache miss - fetch from Bluesky
-            logger.info("Trending posts cache miss, fetching from Bluesky...")
-            
-            client = self.get_bluesky_client()
-            if not client:
-                logger.error("Could not get Bluesky client for trending posts")
-                return []
-
-            # Fetch trending posts (last 6 hours, top 100 posts)
-            trending_posts = client.get_top_posts_multiple_queries(
-                queries=["the", "a", "I", "you", "this", "today", "new", "just", "now", "really"],
-                target_count=100,
-                time_hours=6
-            )
-
-            if not trending_posts:
-                logger.warning("No trending posts retrieved from Bluesky")
-                return []
-
-            # Convert to minimal feed format (consistent with user feeds)
-            formatted_posts = []
-            for post in trending_posts:
-                formatted_post = {
-                    "post_uri": post['uri'],
-                    "uri": post['uri'],  # Required for consumption tracking
-                    "score": post['engagement_score'],  # Required for sorting
-                    "post_type": "original",  # Default for trending posts
-                    "followed_user": None  # Not applicable for trending
-                }
-                formatted_posts.append(formatted_post)
-
-            # Cache for 30 minutes
-            self.redis_client.cache_trending_posts(formatted_posts, ttl=1800)
-            logger.info(f"Cached {len(formatted_posts)} trending posts for 30 minutes")
-            
-            return formatted_posts
-
-        except Exception as e:
-            logger.error(f"Error fetching trending posts: {e}")
-            return []
-
     def setup_routes(self):
         """Setup FastAPI routes"""
         
@@ -291,20 +241,18 @@ class FeedServer:
                         self.handle_user_request(user_did, feed)
                     logger.info(f"Retrieved {len(cached_posts)} personalized posts for user {user_did or 'anonymous'}")
                     
-                    # Get unconsumed posts (top 20) and consumed posts for flowing feed
-                    unconsumed_posts = self.redis_client.filter_unconsumed_posts(user_did, cached_posts)
-                    consumed_posts = self.redis_client.get_consumed_posts_for_feed(user_did, cached_posts)
+                    # Split posts into fresh vs old for flowing feed
+                    fresh_posts, old_posts = self.redis_client.split_posts_by_consumption(user_did, cached_posts)
                     
-                    # Create flowing feed with 100-post limit while preserving structure
+                    # Create flowing feed: 20 fresh + 80 old = 100 max
                     MAX_POSTS = 100
-                    unconsumed_limit = min(20, len(unconsumed_posts))
-                    remaining_slots = MAX_POSTS - unconsumed_limit
+                    fresh_limit = min(20, len(fresh_posts))
+                    old_limit = MAX_POSTS - fresh_limit
 
-                    # Take up to 20 unconsumed posts, then fill remaining slots with consumed posts
-                    flowing_feed = unconsumed_posts[:unconsumed_limit] + consumed_posts[:remaining_slots]
+                    flowing_feed = fresh_posts[:fresh_limit] + old_posts[:old_limit]
                     cached_posts = flowing_feed
                     
-                    logger.info(f"Flowing feed: {len(unconsumed_posts[:unconsumed_limit])} unconsumed + {len(consumed_posts[:remaining_slots])} consumed = {len(flowing_feed)} total posts")
+                    logger.info(f"Flowing feed: {len(fresh_posts[:fresh_limit])} fresh + {len(old_posts[:old_limit])} old = {len(flowing_feed)} total posts")
                     
                 else:
                     # POTENTIALLY NEW USER: Serve default feed, track activity and log if new
@@ -316,24 +264,18 @@ class FeedServer:
                     # Get default feed
                     default_posts = self.redis_client.get_default_feed()
                     if default_posts:
-                        cached_posts = default_posts[:20]  # Apply window to default feed too
+                        cached_posts = default_posts[:100]  # Apply window to default feed too
                         logger.info(f"Serving {len(cached_posts)} default posts to new user {user_did or 'anonymous'}")
                     else:
-                        # Last resort - fetch trending posts
-                        trending_posts = self.get_trending_posts()
-                        if trending_posts:
-                            cached_posts = trending_posts[:20]  # Apply window to trending feed too
-                            logger.info(f"Serving {len(cached_posts)} trending posts to new user {user_did or 'anonymous'}")
-                        else:
-                            logger.warning("No default or trending posts available for fallback")
+                        logger.warning("No default posts available for fallback")
                 
                 # Build feed items from windowed posts
                 feed_items = []
                 for post in cached_posts:
-                    if not post.get("post_uri"):
+                    if not post.get("uri"):
                         continue
                         
-                    feed_item = {"post": post["post_uri"]}
+                    feed_item = {"post": post["uri"]}
                     
                     # Add repost information if this is a repost
                     if post.get('post_type') == 'repost' and post.get('followed_user'):
@@ -344,16 +286,8 @@ class FeedServer:
                     
                     feed_items.append(feed_item)
                 
-                # Mark only new unconsumed posts as consumed (don't re-mark already consumed posts)
-                if user_did and 'unconsumed_posts' in locals():
-                    new_posts_to_mark = unconsumed_posts[:20]  # Only the 20 new posts served
-                    if new_posts_to_mark:
-                        new_uris = [post.get("uri") for post in new_posts_to_mark if post.get("uri")]
-                        if new_uris:
-                            self.redis_client.mark_posts_consumed(user_did, new_uris)
-                            logger.debug(f"Marked {len(new_uris)} new posts as consumed for user {user_did}")
-                elif user_did and cached_posts:
-                    # Fallback for new users or when no personalized feed exists
+                # Mark whatever we served as consumed
+                if user_did and cached_posts:
                     served_uris = [post.get("uri") for post in cached_posts if post.get("uri")]
                     if served_uris:
                         self.redis_client.mark_posts_consumed(user_did, served_uris)
