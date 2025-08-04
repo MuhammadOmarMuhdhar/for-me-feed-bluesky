@@ -96,6 +96,7 @@ class FeedServer:
                     @user_id AS user_id,
                     @handle AS handle,
                     @keywords AS keywords,
+                    @embeddings AS embeddings,
                     @timestamp AS last_request_at,
                     @request_count AS request_count,
                     @timestamp AS created_at,
@@ -103,8 +104,8 @@ class FeedServer:
             ) AS source
             ON target.user_id = source.user_id
             WHEN NOT MATCHED THEN
-                INSERT (user_id, handle, keywords, last_request_at, request_count, created_at, updated_at)
-                VALUES (source.user_id, source.handle, source.keywords, source.last_request_at, source.request_count, source.created_at, source.updated_at)
+                INSERT (user_id, handle, keywords, embeddings, last_request_at, request_count, created_at, updated_at)
+                VALUES (source.user_id, source.handle, source.keywords, source.embeddings, source.last_request_at, source.request_count, source.created_at, source.updated_at)
             """
             
             job_config = bigquery.QueryJobConfig(
@@ -112,6 +113,7 @@ class FeedServer:
                     bigquery.ScalarQueryParameter("user_id", "STRING", user_did),
                     bigquery.ScalarQueryParameter("handle", "STRING", ''),
                     bigquery.ScalarQueryParameter("keywords", "JSON", []),
+                    bigquery.ScalarQueryParameter("embeddings", "JSON", None),
                     bigquery.ScalarQueryParameter("timestamp", "TIMESTAMP", current_time),
                     bigquery.ScalarQueryParameter("request_count", "INTEGER", 1)
                 ]
