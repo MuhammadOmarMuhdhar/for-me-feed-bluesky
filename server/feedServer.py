@@ -88,24 +88,16 @@ class FeedServer:
             # INSERT with duplicate protection (handles any remaining race conditions)
             from google.cloud import bigquery
             
-            # Use MERGE for absolute duplicate protection
+            # Use INSERT with duplicate protection (correct BigQuery syntax with dummy FROM)
             insert_query = f"""
-            MERGE `{bq_client.project_id}.data.users` AS target
-            USING (
-                SELECT 
-                    @user_id AS user_id,
-                    @handle AS handle,
-                    @keywords AS keywords,
-                    @embeddings AS embeddings,
-                    @timestamp AS last_request_at,
-                    @request_count AS request_count,
-                    @timestamp AS created_at,
-                    @timestamp AS updated_at
-            ) AS source
-            ON target.user_id = source.user_id
-            WHEN NOT MATCHED THEN
-                INSERT (user_id, handle, keywords, embeddings, last_request_at, request_count, created_at, updated_at)
-                VALUES (source.user_id, source.handle, source.keywords, source.embeddings, source.last_request_at, source.request_count, source.created_at, source.updated_at)
+            INSERT INTO `{bq_client.project_id}.data.users` 
+            (user_id, handle, keywords, embeddings, last_request_at, request_count, created_at, updated_at)
+            SELECT @user_id, @handle, @keywords, @embeddings, @timestamp, @request_count, @timestamp, @timestamp
+            FROM (SELECT 1) AS dummy
+            WHERE NOT EXISTS (
+                SELECT 1 FROM `{bq_client.project_id}.data.users` 
+                WHERE user_id = @user_id
+            )
             """
             
             job_config = bigquery.QueryJobConfig(
