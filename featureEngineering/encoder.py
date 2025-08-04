@@ -1,299 +1,74 @@
 from sentence_transformers import SentenceTransformer
-from umap import UMAP
 import torch
 import numpy as np
-import pickle
+import json
 import os
+import logging
+from typing import Dict, List, Optional
 
-def run(posts,
-        model_name='sentence-transformers/all-mpnet-base-v2',
-        batch_size=100,
-        umap_components=32,
-        random_state=42,
-        min_dist=0.0,
-        n_neighbors=15,
-        spread=20,
-        device=None,
-        umap_model_path=None,
-        use_parametric=False,
-        skip_embedding=False,
-        save_parametric_model_path=None):
+def embed_posts(user_data: Dict,
+                     model_name: str = 'sentence-transformers/all-MiniLM-L6-v2',
+                     batch_size: int = 100,
+                     device: Optional[str] = None,
+                     output_path: Optional[str] = None) -> List[Dict]:
     """
-    Efficiently encode Bluesky post text in batches using sentence transformers,
-    and add UMAP dimensionality reduction using either standard UMAP or saved Parametric UMAP.
+    Encode user post-like data using SentenceTransformer in batches.
     
-    Parameters:
-    -----------
-    posts : list of dict
-        List of Bluesky post dictionaries, each containing at least a 'text' key
-        If skip_embedding=True, should contain 'embedding' key instead
-    model_name : str, optional
-        Name of the SentenceTransformer model to use (default: 'all-MiniLM-L6-v2')
-    batch_size : int, optional
-        Number of posts to process in each batch (default: 100)
-    umap_components : int, optional
-        Number of dimensions for UMAP reduction (default: 32)
-    random_state : int, optional
-        Random seed for UMAP for reproducibility (default: 42)
-    min_dist : float, optional
-        UMAP min_dist parameter controlling how tightly points are packed (default: 0.0)
-    n_neighbors : int, optional
-        UMAP n_neighbors parameter controlling local versus global structure (default: 15)
-    device : str, optional
-        Device to run the model on ('cpu', 'cuda', 'mps', etc.)
-        If None, will use CUDA if available, otherwise CPU
-    umap_model_path : str, optional
-        Path to saved Parametric UMAP model (e.g., 'data/umap_model/model.pkl')
-        If provided, will load and use this trained model instead of creating new one
-    use_parametric : bool, optional
-        Whether to use parametric UMAP. If True and umap_model_path is None, 
-        will create new parametric UMAP (default: False)
-    skip_embedding : bool, optional
-        If True, skip embedding calculation and use existing 'embedding' field from posts.
-        Useful when posts already contain precomputed embeddings (default: False)
-    save_parametric_model_path : str, optional
-        Path to save the trained Parametric UMAP model when use_parametric=True and umap_model_path=None
-        Only used when creating a new parametric model (default: None)
-        
+    Args:
+        user_data: Dict with keys like 'posts', 'reposts', 'replies', etc., each a list of dicts with 'text'
+        model_name: SentenceTransformer model to use
+        batch_size: Number of texts to embed per batch
+        device: Force specific device (e.g. 'cuda', 'cpu', 'mps'); auto-detect if None
+        output_path: Optional file path to save result as JSON
+    
     Returns:
-    --------
-    list of dict
-        The input posts with 'embedding' and UMAP embeddings as UMAP1, UMAP2, ... fields
+        List of dicts with 'text' and 'embedding'
     """
+    print(f"Encoding user texts using model: {model_name}")
     
-    if skip_embedding:
-        # Use existing embeddings
-        valid_indices = []
-        all_embeddings = []
-        
-        for i, post in enumerate(posts):
-            embedding = post.get('embedding')
-            if embedding is not None:
-                valid_indices.append(i)
-                # Convert to numpy array if it's a list
-                if isinstance(embedding, list):
-                    embedding_np = np.array(embedding)
-                else:
-                    embedding_np = embedding
-                all_embeddings.append(embedding_np)
-        
-        if all_embeddings:
-            all_embeddings = np.vstack(all_embeddings)
-            print(f"Success: Using existing embeddings for {len(all_embeddings)} posts")
-        else:
-            print("Warning: No valid embeddings found in posts. Please check your data.")
-            return posts
+    # Gather all valid text entries across all sources
+    documents = []
+    for key in ['posts', 'reposts', 'replies', 'likes']:
+        for item in user_data.get(key, []):
+            text = item.get('text', '')
+            if isinstance(text, str) and text.strip():
+                documents.append(text.strip())
+
+    if not documents:
+        print("No valid text found for embedding.")
+        return []
+    
+    print(f"Collected {len(documents)} texts for embedding.")
+
+    # Load model
+    model = SentenceTransformer(model_name)
+
+    # Set device
+    if device:
+        model = model.to(device)
+        print(f"Using specified device: {device}")
     else:
-        # Calculate new embeddings (original behavior)
-        # Load sentence transformer model
-        model = SentenceTransformer(model_name)
-        
-        # Set device if specified
-        if device:
-            model = model.to(device)
-        
-        # Extract post text (skipping None or empty text)
-        valid_indices = []
-        texts_to_encode = []
-        
-        for i, post in enumerate(posts):
-            text = post.get('text')
-            if text and isinstance(text, str) and text.strip():
-                valid_indices.append(i)
-                texts_to_encode.append(text)
-        
-        # Process post texts in batches to get original embeddings
-        original_embeddings = []
-        
-        for i in range(0, len(texts_to_encode), batch_size):
-            batch = texts_to_encode[i:i+batch_size]
-            batch_embeddings = model.encode(
-                batch, 
-                convert_to_tensor=True, 
-                normalize_embeddings=True,
-                show_progress_bar=False
-            )
-            
-            # Convert to numpy for storage
-            if isinstance(batch_embeddings, torch.Tensor):
-                batch_embeddings_np = batch_embeddings.cpu().numpy()
-            else:
-                batch_embeddings_np = np.array(batch_embeddings)
-                
-            original_embeddings.append(batch_embeddings_np)
-        
-        # Combine all batches
-        if original_embeddings:
-            all_embeddings = np.vstack(original_embeddings)
-            
-            # Store embeddings in posts if we calculated them
-            original_embeddings_list = all_embeddings.tolist()
-            for idx, post_idx in enumerate(valid_indices):
-                posts[post_idx]['embedding'] = original_embeddings_list[idx]
+        if torch.cuda.is_available():
+            model = model.to('cuda')
+            print("Using CUDA")
+        elif torch.backends.mps.is_available():
+            model = model.to('mps')
+            print("Using MPS")
         else:
-            print("Warning: No valid post text found for embedding.")
-            return posts
-    
-    # Apply UMAP dimensionality reduction directly (PCA removed for better small dataset handling)
-    if len(all_embeddings) > 0:
-        # Choose UMAP approach based on parameters
-        if umap_model_path:
-            # Check if it's a cloud storage path, hugging face path, or local path
-            is_cloud_path = umap_model_path.startswith('gs://')
-            is_hf_path = umap_model_path.startswith('hf://')
-            path_exists = is_cloud_path or is_hf_path or os.path.exists(umap_model_path)
-            
-            if path_exists:
-                # Load saved Parametric UMAP model
-                print(f"Loading saved Parametric UMAP model from: {umap_model_path}")
-                try:
-                    if is_hf_path:
-                        # For Hugging Face, download model to local cache
-                        from huggingface_hub import snapshot_download
-                        
-                        # Parse repo_id from hf:// URL (e.g., hf://notMuhammad/atproto-topic-umap)
-                        repo_id = umap_model_path.replace('hf://', '')
-                        
-                        # Download model to local cache
-                        local_model_path = snapshot_download(
-                            repo_id=repo_id,
-                            repo_type="model"
-                        )
-                        print(f"Downloaded model from Hugging Face to: {local_model_path}")
-                        
-                        # Load from local cache directory
-                        from umap.parametric_umap import load_ParametricUMAP
-                        umap_instance = load_ParametricUMAP(os.path.join(local_model_path, "model"))
-                        
-                    elif is_cloud_path:
-                        # For cloud storage, download model to temp directory first
-                        import tempfile
-                        from google.cloud import storage
-                        
-                        temp_dir = tempfile.mkdtemp()
-                        
-                        # Parse bucket and path from gs:// URL
-                        path_parts = umap_model_path.replace('gs://', '').split('/', 1)
-                        bucket_name = path_parts[0]
-                        model_prefix = path_parts[1] if len(path_parts) > 1 else ''
-                        
-                        # Download model files
-                        client = storage.Client()
-                        bucket = client.bucket(bucket_name)
-                        
-                        # List and download all model files
-                        blobs = bucket.list_blobs(prefix=model_prefix)
-                        local_model_path = None
-                        
-                        for blob in blobs:
-                            if blob.name.endswith('/'):
-                                continue  # Skip directories
-                            
-                            # Create local file path
-                            local_file_path = os.path.join(temp_dir, os.path.basename(blob.name))
-                            blob.download_to_filename(local_file_path)
-                            print(f"Downloaded {blob.name} to {local_file_path}")
-                            
-                            # Set model path to directory for loading
-                            if local_model_path is None:
-                                local_model_path = temp_dir
-                        
-                        # Load from local temp directory
-                        from umap.parametric_umap import load_ParametricUMAP
-                        umap_instance = load_ParametricUMAP(local_model_path)
-                    else:
-                        # Load from local path
-                        from umap.parametric_umap import load_ParametricUMAP
-                        umap_instance = load_ParametricUMAP(umap_model_path)
-                        
-                except Exception as e:
-                    print(f"Failed to load model: {e}")
-                    print("Creating new Parametric UMAP instead...")
-                    # Fall through to create new model
-                    umap_instance = None
-                
-                if umap_instance is not None:
-                    # Transform using the loaded model
-                    umap_embeddings = umap_instance.transform(all_embeddings)
-                    print(f"Success: Applied saved Parametric UMAP to {len(all_embeddings)} embeddings")
-                else:
-                    # Create new model if loading failed
-                    print("Creating new Parametric UMAP...")
-                    from umap.parametric_umap import ParametricUMAP
-                    
-                    umap_instance = ParametricUMAP(
-                        n_components=umap_components,
-                        random_state=random_state,
-                        min_dist=min_dist,
-                        n_neighbors=n_neighbors,
-                        spread=spread,
-                        batch_size=min(batch_size, 128)
-                    )
-                    umap_embeddings = umap_instance.fit_transform(all_embeddings)
-                    print(f"Success: Created new Parametric UMAP for {len(all_embeddings)} embeddings")
-            else:
-                print(f"Model path {umap_model_path} does not exist, creating new model")
-                # Create new model
-                print("Creating new Parametric UMAP...")
-                from umap.parametric_umap import ParametricUMAP
-                
-                umap_instance = ParametricUMAP(
-                    n_components=umap_components,
-                    random_state=random_state,
-                    min_dist=min_dist,
-                    n_neighbors=n_neighbors,
-                    spread=spread,
-                    batch_size=min(batch_size, 128)
-                )
-                umap_embeddings = umap_instance.fit_transform(all_embeddings)
-                print(f"Success: Created new Parametric UMAP for {len(all_embeddings)} embeddings")
-            
-        elif use_parametric:
-            # Create new Parametric UMAP
-            print("Creating new Parametric UMAP...")
-            from umap.parametric_umap import ParametricUMAP
-            
-            umap_instance = ParametricUMAP(
-                n_components=umap_components,
-                random_state=random_state,
-                min_dist=min_dist,
-                n_neighbors=n_neighbors,
-                spread=spread,
-                batch_size=min(batch_size, 128)
-                 )
-            
+            print("Using CPU")
 
-            umap_embeddings = umap_instance.fit_transform(all_embeddings)
-            print(f"Success: Created new Parametric UMAP for {len(all_embeddings)} embeddings")
+    # Batch processing
+    all_embeddings = []
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i:i+batch_size]
+        print(f"Processing batch {i//batch_size + 1} of {(len(documents) + batch_size - 1)//batch_size}")
+        embeddings = model.encode(batch, convert_to_tensor=True, normalize_embeddings=True, show_progress_bar=True)
+        all_embeddings.append(embeddings.cpu().numpy())
 
-            # Save the trained model if requested
-            if save_parametric_model_path:
-                os.makedirs(os.path.dirname(save_parametric_model_path), exist_ok=True)
-                try:
-                    umap_instance.save(save_parametric_model_path)
-                    print(f"Success: Saved Parametric UMAP model to {save_parametric_model_path}")
-                except Exception as e:
-                    print(f"Warning: Failed to save Parametric UMAP model: {e}")
-            
-        else:
-            # Use standard UMAP (original behavior)
-            print("Using standard UMAP...")
-            umap_instance = UMAP(
-                n_components=umap_components,
-                random_state=random_state,
-                min_dist=min_dist,
-                n_neighbors=n_neighbors,
-                spread=spread,
-                metric='euclidean',
-            )
-            umap_embeddings = umap_instance.fit_transform(all_embeddings)
-            print(f"Success: Applied standard UMAP to {len(all_embeddings)} embeddings")
-        
-        # Convert UMAP embeddings to list format and assign to posts
-        umap_embeddings_list = umap_embeddings.tolist()
-        
-        for idx, post_idx in enumerate(valid_indices):
-            for component_idx in range(umap_components):
-                posts[post_idx][f'UMAP{component_idx + 1}'] = umap_embeddings_list[idx][component_idx]
-    
-    return posts
+    all_embeddings = np.vstack(all_embeddings)
+    result = [{'text': text, 'embedding': emb.tolist()} for text, emb in zip(documents, all_embeddings)]
+
+    print(f"Successfully encoded {len(result)} documents.")
+
+    # Save if path is provided
+    return result

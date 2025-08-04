@@ -13,6 +13,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.bluesky.userData import Client as BlueskyUserDataClient
 from client.bigQuery import Client as BigQueryClient
 from featureEngineering.userKeywords import extract_user_keywords
+from featureEngineering.encoder import embed_posts
+
 
 # Configure logging
 logging.basicConfig(
@@ -21,34 +23,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def decode_jwt_user_did(jwt_token: str) -> Optional[str]:
-    """
-    Extract user DID from JWT token (simplified version)
-    In production, use proper JWT library with signature verification
-    """
-    try:
-        import base64
-        
-        # Split JWT token
-        parts = jwt_token.split('.')
-        if len(parts) != 3:
-            return None
-            
-        # Decode payload (middle part)
-        payload = parts[1]
-        # Add padding if needed
-        payload += '=' * (4 - len(payload) % 4)
-        
-        decoded = base64.b64decode(payload)
-        payload_data = json.loads(decoded)
-        
-        # Extract user DID from 'iss' field
-        user_did = payload_data.get('iss')
-        return user_did
-        
-    except Exception as e:
-        logger.error(f"Failed to decode JWT: {e}")
-        return None
 
 def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: datetime) -> List[Dict]:
     """
@@ -65,7 +39,7 @@ def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: d
         query = f"""
         SELECT DISTINCT user_id, last_request_at, request_count
         FROM `{bq_client.project_id}.data.users`
-        WHERE (handle = '' OR handle IS NULL)
+        WHERE (handle = '' OR handle IS NULL) OR embeddings IS NULL
         AND last_request_at >= '{since_timestamp.isoformat()}'
         AND user_id LIKE 'did:plc:%'
         ORDER BY last_request_at DESC
@@ -161,11 +135,26 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
             logger.warning(f"User {user_profile.get('handle')} has insufficient content ({total_items} items)")
             return None
         
-        # Extract keywords from user content
+        # Extract keywords and generate single user embedding from user content
         keywords = extract_user_keywords(user_data, top_k=50, min_freq=1)
+        
+        # Generate single embedding by combining all user posts
+        all_posts = embed_posts(user_data)
+        user_embedding = None
+        
+        if all_posts:
+            # Average all post embeddings to create single user embedding
+            import numpy as np
+            embeddings_matrix = np.array([post['embedding'] for post in all_posts])
+            user_embedding = np.mean(embeddings_matrix, axis=0).tolist()
+            logger.info(f"Generated single user embedding of size {len(user_embedding)} from {len(all_posts)} posts")
         
         if not keywords:
             logger.warning(f"No keywords extracted for user {user_profile.get('handle')}")
+            return None
+            
+        if not user_embedding:
+            logger.warning(f"No embedding generated for user {user_profile.get('handle')}")
             return None
         
         # Prepare user data for BigQuery
@@ -173,6 +162,7 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
             'user_id': user_did,
             'handle': user_profile.get('handle', ''),
             'keywords': keywords,  # Store as JSON array
+            'embeddings': user_embedding,  # Single embedding vector
             'updated_at': datetime.utcnow()
         }
         
@@ -193,6 +183,7 @@ def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, 
         UPDATE `{bq_client.project_id}.data.users`
         SET handle = @handle,
             keywords = @keywords,
+            embeddings = @embeddings,
             updated_at = CURRENT_TIMESTAMP()
         WHERE user_id = @user_id
         """
@@ -201,6 +192,7 @@ def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, 
             query_parameters=[
                 bigquery.ScalarQueryParameter("handle", "STRING", user_data['handle']),
                 bigquery.ScalarQueryParameter("keywords", "JSON", user_data['keywords']),
+                bigquery.ScalarQueryParameter("embeddings", "JSON", user_data['embeddings']),
                 bigquery.ScalarQueryParameter("user_id", "STRING", user_data['user_id'])
             ]
         )

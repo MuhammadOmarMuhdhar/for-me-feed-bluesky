@@ -12,8 +12,11 @@ venv/
 .venv/
 
 # Output files
-*.json
 *.csv
+feed_snapshot_20250801_221809.json
+feed_snapshot_20250801_222026.json
+list_members_test_20250802_211731.json
+list_members_test_20250802_211747.json
 
 # IDE
 .vscode/
@@ -26,3 +29,5 @@ venv/
 Thumbs.db
 
 CLAUDE.md
+utils/
+tests
