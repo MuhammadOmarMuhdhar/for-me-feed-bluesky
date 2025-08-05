@@ -175,6 +175,58 @@ def is_faq_post(post: Dict, position: int) -> bool:
     return False
 
 
+def calculate_engagement_score(post: Dict) -> float:
+    """
+    Calculate combined engagement score for a post
+    
+    Args:
+        post: Post dictionary with engagement metrics
+        
+    Returns:
+        Combined engagement score (likes + reposts*2 + replies*0.5)
+    """
+    likes = post.get('like_count', 0)
+    reposts = post.get('repost_count', 0)
+    replies = post.get('reply_count', 0)
+    
+    # Combined engagement: likes + (reposts * 2) + (replies * 0.5)
+    return likes + (reposts * 2) + (replies * 0.5)
+
+
+def filter_low_engagement_posts(posts: List[Dict], source: str, min_engagement: float = 8.0) -> List[Dict]:
+    """
+    Filter posts based on engagement threshold for feeds and search posts
+    
+    Args:
+        posts: List of posts to filter
+        source: Source type ('feed', 'network', 'keyword')
+        min_engagement: Minimum engagement score required
+        
+    Returns:
+        Filtered posts that meet engagement criteria
+    """
+    if source == 'network':
+        # Never filter network posts - always include following posts
+        return posts
+    
+    filtered_posts = []
+    low_engagement_count = 0
+    
+    for post in posts:
+        engagement_score = calculate_engagement_score(post)
+        
+        if engagement_score >= min_engagement:
+            post['engagement_score'] = engagement_score  # Store for potential later use
+            filtered_posts.append(post)
+        else:
+            low_engagement_count += 1
+    
+    if low_engagement_count > 0:
+        logger.info(f"Filtered {low_engagement_count} low-engagement posts from {source} source (< {min_engagement} score)")
+    
+    return filtered_posts
+
+
 def filter_faq_posts(posts: List[Dict]) -> List[Dict]:
     """
     Filter out FAQ and instructional posts from a list
@@ -329,6 +381,9 @@ def collect_comprehensive_posts(
                         # Filter FAQ posts before processing
                         posts = filter_faq_posts(posts)
                         
+                        # Filter low-engagement posts
+                        posts = filter_low_engagement_posts(posts, source='feed', min_engagement=15.0)
+                        
                         # Tag posts with feed info
                         for post in posts:
                             post['source'] = 'feed'
@@ -370,7 +425,8 @@ def collect_comprehensive_posts(
                     repost_weight=0.5
                 )
                 
-                # Tag network posts
+                # Filter and tag network posts  
+                network_posts = filter_low_engagement_posts(network_posts, source='network')
                 for post in network_posts:
                     post['source'] = 'network'
                     post['from_network'] = True
@@ -402,7 +458,8 @@ def collect_comprehensive_posts(
                     time_hours=12
                 )
             
-            # Tag keyword posts
+            # Filter and tag keyword posts
+            keyword_posts = filter_low_engagement_posts(keyword_posts, source='keyword', min_engagement=15.0)
             for post in keyword_posts:
                 post['source'] = 'keyword'
                 post['from_trending'] = True
