@@ -190,16 +190,45 @@ class FeedServer:
 
         @self.app.get("/.well-known/did.json")
         def get_did_document():
-            hostname = os.getenv('FEEDGEN_HOSTNAME', 'localhost')
-            return {
-                "@context": ["https://www.w3.org/ns/did/v1"],
-                "id": f"did:web:{hostname}",
-                "service": [{
-                    "id": "#bsky_fg",
-                    "type": "BskyFeedGenerator", 
-                    "serviceEndpoint": f"https://{hostname}"
-                }]
-            }
+            try:
+                # Check Redis cache first for instant response
+                cached_did = self.redis_client.client.get("did_document")
+                if cached_did:
+                    logger.debug("Serving DID document from cache")
+                    return json.loads(cached_did)
+                
+                # Generate DID document if not cached
+                hostname = os.getenv('FEEDGEN_HOSTNAME', 'localhost')
+                did_doc = {
+                    "@context": ["https://www.w3.org/ns/did/v1"],
+                    "id": f"did:web:{hostname}",
+                    "service": [{
+                        "id": "#bsky_fg",
+                        "type": "BskyFeedGenerator", 
+                        "serviceEndpoint": f"https://{hostname}"
+                    }]
+                }
+                
+                # Cache for 24 hours (DID documents rarely change)
+                self.redis_client.client.set("did_document", 
+                                           json.dumps(did_doc), 
+                                           ex=86400)
+                logger.info("Generated and cached DID document")
+                return did_doc
+                
+            except Exception as e:
+                # Fallback to uncached generation if Redis fails
+                logger.warning(f"DID caching failed, serving uncached: {e}")
+                hostname = os.getenv('FEEDGEN_HOSTNAME', 'localhost')
+                return {
+                    "@context": ["https://www.w3.org/ns/did/v1"],
+                    "id": f"did:web:{hostname}",
+                    "service": [{
+                        "id": "#bsky_fg",
+                        "type": "BskyFeedGenerator", 
+                        "serviceEndpoint": f"https://{hostname}"
+                    }]
+                }
 
         @self.app.get("/xrpc/app.bsky.feed.getFeedSkeleton")
         def get_feed_skeleton(request: Request, feed: str):
