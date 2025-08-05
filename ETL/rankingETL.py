@@ -336,6 +336,155 @@ def get_user_keywords_as_terms(user_keywords) -> List[str]:
         logger.error(f"Failed to process user keywords: {e}")
         return []
 
+
+def prioritize_follows_by_ratio(following_list: List[Dict], posts_client, std_dev_multiplier: float = 0.2) -> List[Dict]:
+    """
+    Filter following list using dynamic percentiles based on postsCount/followersCount ratio
+    
+    Args:
+        following_list: List of user objects from get_all_user_follows()
+        std_dev_multiplier: How many standard deviations above mean to set threshold
+        
+    Returns:
+        Filtered list of users above the dynamic threshold
+    """
+    if not following_list:
+        logger.warning("Empty following list provided to ratio filtering")
+        return []
+    
+    try:
+        # Calculate ratios for all users
+        user_ratios = []
+        valid_users = []
+        
+        # Extract DIDs for batch profile fetching
+        dids = [user.get('did') for user in following_list if user.get('did')]
+        if not dids:
+            logger.warning("No DIDs found in following list")
+            return following_list
+        
+        # Fetch profiles in batches of 25 (API limit)
+        all_profiles = []
+        batch_size = 25
+        
+        for i in range(0, len(dids), batch_size):
+            batch_dids = dids[i:i + batch_size]
+            try:
+                logger.info(f"Fetching profile batch {i//batch_size + 1}/{(len(dids) + batch_size - 1)//batch_size}: {len(batch_dids)} profiles")
+                profiles_batch = posts_client.get_profiles(batch_dids)
+                all_profiles.extend(profiles_batch)
+            except Exception as e:
+                logger.error(f"Error fetching profile batch: {e}")
+                continue
+        
+        if not all_profiles:
+            logger.warning("No profiles fetched, falling back to original list")
+            return following_list
+        
+        # Create lookup map from DID to profile
+        profile_map = {profile['did']: profile for profile in all_profiles}
+        logger.info(f"Successfully fetched {len(all_profiles)} profiles out of {len(dids)} requested")
+        
+        # Debug: Log first few profiles to see actual field names and scoring
+        if all_profiles:
+            sample_profile = all_profiles[0]
+            logger.info(f"Debug sample profile keys: {list(sample_profile.keys())}")
+            posts = sample_profile.get('postsCount', 0)
+            followers = sample_profile.get('followersCount', 1) or 1
+            follows = sample_profile.get('followsCount', 1) or 1
+            activity = posts / followers
+            selectivity = followers / follows
+            combined = activity * selectivity
+            logger.info(f"Debug sample scores: posts={posts}, followers={followers}, follows={follows}")
+            logger.info(f"Debug sample ratios: activity={activity:.3f}, selectivity={selectivity:.3f}, combined={combined:.3f}")
+        
+        for user in following_list:
+            user_did = user.get('did')
+            profile = profile_map.get(user_did)
+            
+            if not profile:
+                continue
+                
+            posts_count = profile.get('postsCount', 0)
+            followers_count = profile.get('followersCount', 1)
+            follows_count = profile.get('followsCount', 1)
+            
+            # Avoid division by zero
+            if followers_count <= 0:
+                followers_count = 1
+            if follows_count <= 0:
+                follows_count = 1
+                
+            # Two-factor scoring: activity × selectivity
+            activity = posts_count / followers_count      # How much they post relative to followers
+            selectivity = followers_count / follows_count # How selective they are (followers/following)
+            combined_score = activity * selectivity
+            
+            user_ratios.append(combined_score)
+            
+            # Add profile data to user dict
+            enhanced_user = user.copy()
+            enhanced_user.update({
+                'postsCount': posts_count,
+                'followersCount': followers_count,
+                'followsCount': follows_count,
+                'activity_score': activity,
+                'selectivity_score': selectivity,
+                'calculated_ratio': combined_score
+            })
+            valid_users.append(enhanced_user)
+        
+        if not user_ratios:
+            logger.warning("No valid ratios calculated, returning original list")
+            return following_list
+        
+        # Calculate statistics
+        mean_ratio = np.mean(user_ratios)
+        std_ratio = np.std(user_ratios)
+        
+        # Normalize ratios using z-score: (ratio - mean) / std_dev
+        if std_ratio > 0:
+            z_scores = [(ratio - mean_ratio) / std_ratio for ratio in user_ratios]
+        else:
+            # If std_dev is 0 (all ratios are the same), keep all users
+            z_scores = [0.0] * len(user_ratios)
+        
+        # Threshold: keep users above +0.0 standard deviations
+        z_threshold = -0.25
+        
+        # Filter users above z-score threshold
+        filtered_users = []
+        for user, z_score in zip(valid_users, z_scores):
+            if z_score >= z_threshold:
+                # Add z-score to user data for debugging
+                user['z_score'] = z_score
+                filtered_users.append(user)
+        
+        # Log filtering results
+        logger.info(f"Ratio filtering results (Z-score normalized):")
+        logger.info(f"  Original users: {len(following_list)}")
+        logger.info(f"  Profiles fetched: {len(all_profiles)}")
+        logger.info(f"  Valid ratios: {len(user_ratios)}")
+        logger.info(f"  Mean ratio: {mean_ratio:.3f}")
+        logger.info(f"  Std dev: {std_ratio:.3f}")
+        logger.info(f"  Z-score threshold: {z_threshold}")
+        logger.info(f"  Users above threshold: {len(filtered_users)}")
+        logger.info(f"  Filter rate: {len(filtered_users)/len(user_ratios)*100:.1f}%")
+        
+        # Always return at least 30% of users if available
+        min_users = max(20, len(valid_users) // 3)  # At least 20 users or 30% of total
+        if len(filtered_users) < min_users:
+            logger.info(f"Filter too aggressive ({len(filtered_users)} users), taking top {min_users} users by ratio")
+            valid_users.sort(key=lambda x: x['calculated_ratio'], reverse=True)
+            filtered_users = valid_users[:min_users]
+        
+        return filtered_users
+        
+    except Exception as e:
+        logger.error(f"Error in ratio-based filtering: {e}")
+        logger.error(f"Returning original following list")
+        return following_list
+
 def collect_comprehensive_posts(
     user_embeddings: Optional[np.ndarray],
     user_keywords: List[str], 
@@ -375,7 +524,8 @@ def collect_comprehensive_posts(
                     try:
                         posts = posts_client.extract_posts_from_feed(
                             feed_url_or_uri=feed_match['feed_uri'],
-                            limit=100
+                            limit=100,
+                            time_hours=6
                         )
                         
                         # Filter FAQ posts before processing
@@ -416,6 +566,10 @@ def collect_comprehensive_posts(
             following_data = user_client.get_all_user_follows(user_did)
             following_list = following_data if following_data else []
             
+            # Apply dynamic ratio-based filtering
+            if following_list:
+                following_list = prioritize_follows_by_ratio(following_list, user_client)
+            
             if following_list:
                 network_posts = posts_client.get_following_timeline(
                     following_list=following_list,
@@ -448,14 +602,15 @@ def collect_comprehensive_posts(
                 keyword_posts = posts_client.get_posts_with_user_keywords(
                     user_keywords=user_keywords[:10],  # Limit to top 10 keywords
                     target_count=100,
-                    generic_ratio=0.3  # 30% generic trending posts
+                    generic_ratio=0.1,  # 10% generic trending posts
+                    time_hours=6
                 )
             else:
                 # Fallback to trending posts
                 keyword_posts = posts_client.get_top_posts_multiple_queries(
                     queries=["the", "a", "I", "you", "this", "today", "new", "just"],
                     target_count=100,
-                    time_hours=12
+                    time_hours=6
                 )
             
             # Filter and tag keyword posts
@@ -504,10 +659,14 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 following_list = following_data if following_data else []  # Keep full objects
                 logger.info(f"Retrieved {len(following_list)} following accounts for user {user_did}")
                 
+                # Apply dynamic ratio-based filtering
+                if following_list:
+                    following_list = prioritize_follows_by_ratio(following_list, user_client)
+                
                 # Debug: Log first few following accounts
                 if following_list:
                     sample_dids = [f.get('did', 'unknown') for f in following_list[:3]]
-                    logger.info(f"Sample following DIDs: {sample_dids}...")
+                    logger.info(f"Sample following DIDs after filtering: {sample_dids}...")
                 else:
                     logger.warning(f"No following accounts found for user {user_did}")
                     
@@ -640,26 +799,35 @@ def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dic
         # Calculate BM25 similarity using stored keywords on filtered posts
         ranked_posts = compute_bm25_similarity(user_terms, filtered_posts)
         
-        # Apply feed similarity boosting and create final scores
+        # Apply priority-based boosting: network > feed > search
         for post in ranked_posts:
             bm25_score = post.get('bm25_score', 0)
             source = post.get('source', 'unknown')
             
-            # Calculate feed boost
-            if source == 'feed':
+            # Priority-based boosting system
+            if source == 'network':
+                # Network posts: Highest priority boost (3.0x base + small BM25 bonus)
+                priority_boost = 3.0 + (bm25_score * 0.1)
+                post['priority_boost'] = priority_boost
+                post['boost_reason'] = 'network_priority'
+            elif source == 'feed':
+                # Feed posts: Medium priority boost (feed similarity + BM25)
                 feed_similarity = post.get('feed_similarity', 0)
-                # Convert similarity (0.7-1.0) to boost factor (1.7-2.8)
-                feed_boost = 1.0 + (feed_similarity * 2.0)
-                post['feed_boost'] = feed_boost
+                # Feed boost: 1.5x base + similarity bonus + BM25 bonus
+                priority_boost = 1.5 + (feed_similarity * 1.0) + (bm25_score * 0.2)
+                post['priority_boost'] = priority_boost
+                post['boost_reason'] = 'feed_priority'
             else:
-                feed_boost = 1.0
-                post['feed_boost'] = feed_boost
+                # Search posts: No boost, pure BM25 merit
+                priority_boost = bm25_score
+                post['priority_boost'] = priority_boost
+                post['boost_reason'] = 'merit_only'
             
-            # Apply boost to create final score
-            final_score = bm25_score * feed_boost
+            # Final score = BM25 + Priority Boost
+            final_score = bm25_score + priority_boost
             post['final_score'] = final_score
         
-        # Sort by final score (BM25 * feed_boost)
+        # Sort by final score (BM25 + priority_boost)
         ranked_posts = sorted(ranked_posts, key=lambda x: x.get('final_score', 0), reverse=True)
         
         # Log scoring statistics
@@ -667,12 +835,21 @@ def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dic
         network_posts = [p for p in ranked_posts if p.get('source') == 'network']
         keyword_posts = [p for p in ranked_posts if p.get('source') == 'keyword']
         
-        logger.info(f"Calculated rankings for {len(ranked_posts)} posts using {len(set(user_terms))} unique keywords")
+        logger.info(f"Calculated priority-based rankings for {len(ranked_posts)} posts using {len(set(user_terms))} unique keywords")
         logger.info(f"Source distribution: {len(feed_posts)} feed, {len(network_posts)} network, {len(keyword_posts)} keyword")
         
+        # Log top 10 post sources for verification
+        top_10_sources = [p.get('source', 'unknown') for p in ranked_posts[:10]]
+        source_counts_top10 = {src: top_10_sources.count(src) for src in ['network', 'feed', 'keyword']}
+        logger.info(f"Top 10 posts source breakdown: {source_counts_top10}")
+        
+        if network_posts:
+            avg_network_boost = sum(p.get('priority_boost', 0) for p in network_posts) / len(network_posts)
+            logger.info(f"Average network priority boost: {avg_network_boost:.2f}")
+        
         if feed_posts:
-            avg_feed_boost = sum(p.get('feed_boost', 1.0) for p in feed_posts) / len(feed_posts)
-            logger.info(f"Average feed boost factor: {avg_feed_boost:.2f}x")
+            avg_feed_boost = sum(p.get('priority_boost', 0) for p in feed_posts) / len(feed_posts)
+            logger.info(f"Average feed priority boost: {avg_feed_boost:.2f}")
         
         return ranked_posts
         
@@ -861,7 +1038,7 @@ def cache_user_rankings(redis_client: RedisClient, user_id: str, ranked_posts: L
             new_post = {
                 'post_uri': post_uri,
                 'uri': post_uri,  # Required for consumption tracking
-                'score': float(post.get('bm25_score', 0)),  # Required for sorting
+                'score': float(post.get('final_score', 0)),  # Use final_score for priority-based ranking
                 'post_type': post.get('post_type', 'original'),  # Required for repost detection
                 'followed_user': post.get('followed_user', None)  # Required for repost attribution
             }
@@ -1054,9 +1231,8 @@ def main():
                     logger.warning(f"No rankings calculated for {user_handle}, skipping")
                     continue
                 
-                # Step 4: Distribute network posts evenly throughout feed
-                ranked_posts = distribute_network_posts(ranked_posts, target_network_ratio=0.3)
-                logger.info(f"Applied network post distribution for user {user_handle}")
+                # Step 4: Posts already ranked by priority (network > feed > search)
+                logger.info(f"Applied priority-based ranking for user {user_handle}")
                 
                 # Step 5: Cache results
                 cache_success = cache_user_rankings(redis_client, user_id, ranked_posts)

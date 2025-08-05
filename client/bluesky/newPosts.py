@@ -183,7 +183,7 @@ class Client:
         self,
         user_keywords: List[str],
         target_count: int = 1000,
-        time_hours: int = 24,
+        time_hours: int = 6,
         mix_generic: bool = True,
         generic_ratio: float = 0.3
     ) -> List[Dict]:
@@ -232,7 +232,6 @@ class Client:
         following_list: List[Dict],
         target_count: int = 500,
         time_hours: float = 0.5,
-        sample_ratio: float = 0.3,
         include_reposts: bool = True,
         repost_weight: float = 0.7
     ) -> List[Dict]:
@@ -240,10 +239,9 @@ class Client:
         Get recent posts from users in the following list
         
         Args:
-            following_list: List of followed users from userData.cache_user_follows()
+            following_list: List of followed users (already filtered by ratio upstream)
             target_count: Target number of posts to collect
             time_hours: Time window in hours (0.5 = 30 minutes for incremental updates)
-            sample_ratio: Ratio of following list to sample from (to avoid API limits)
             include_reposts: Whether to include reposts from followed users
             repost_weight: Weight multiplier for reposts (lower = less priority)
             
@@ -257,19 +255,9 @@ class Client:
             print("No following list provided")
             return []
         
-        # Sample users to avoid hitting API limits
-        sample_size = max(10, int(len(following_list) * sample_ratio))
-        if len(following_list) > sample_size:
-            # Prioritize users with higher engagement metrics
-            following_list_sorted = sorted(
-                following_list, 
-                key=lambda x: x.get('posts_count', 0) + x.get('follower_count', 0), 
-                reverse=True
-            )
-            sampled_users = following_list_sorted[:sample_size]
-            print(f"Sampling {sample_size} users from {len(following_list)} follows")
-        else:
-            sampled_users = following_list
+        # Use filtered following list directly (filtering done upstream by ratio)
+        sampled_users = following_list
+        print(f"Using {len(sampled_users)} ratio-filtered users from following list")
         
         since_time = datetime.now() - timedelta(hours=time_hours)
         all_posts = []
@@ -415,7 +403,6 @@ class Client:
                 following_list=following_list,
                 target_count=following_count, 
                 time_hours=time_hours,
-                sample_ratio=0.4,  # Sample 40% of follows to stay within limits
                 include_reposts=include_reposts,
                 repost_weight=repost_weight
             )
@@ -576,7 +563,8 @@ class Client:
         query: str = "python", 
         limit: int = 25, 
         sort: str = "top",
-        ranking: bool = False
+        ranking: bool = False,
+        time_hours: int = None
     ) -> List[Dict]:
         """
         Extract posts from a Bluesky feed (custom feed or search)
@@ -591,9 +579,14 @@ class Client:
             List of post dictionaries
         """
         try:
+            # Calculate time cutoff if specified (matching pattern from other functions)
+            since_time = None
+            if time_hours is not None:
+                since_time = datetime.now() - timedelta(hours=time_hours)
+            
             # If feed URL/URI provided, use getFeed API
             if feed_url_or_uri:
-                return self._extract_from_custom_feed(feed_url_or_uri, limit)
+                return self._extract_from_custom_feed(feed_url_or_uri, limit, ranking, since_time)
             
             # Otherwise use search API
             params = {
@@ -606,6 +599,12 @@ class Client:
             posts = []
             
             for post in response.posts:
+                # Apply time filtering if specified (matching pattern from other functions)
+                if since_time:
+                    post_time = parser.isoparse(post.record.created_at.replace('Z', '+00:00'))
+                    if post_time < since_time.replace(tzinfo=post_time.tzinfo):
+                        continue
+                
                 post_data = {
                     'uri': post.uri,
                     'author_handle': post.author.handle,
@@ -630,7 +629,8 @@ class Client:
     def _extract_from_custom_feed(self, 
                                   feed_url_or_uri: str, 
                                   limit: int, 
-                                  ranking: bool = False) -> List[Dict]:
+                                  ranking: bool = False,
+                                  since_time: datetime = None) -> List[Dict]:
         """Extract posts from a custom feed using getFeed API"""
         try:
             # Convert URL to AT-URI if needed
@@ -646,6 +646,13 @@ class Client:
             
             for feed_item in response.feed:
                 post = feed_item.post
+                
+                # Apply time filtering if specified (matching pattern from other functions)
+                if since_time:
+                    post_time = parser.isoparse(post.record.created_at.replace('Z', '+00:00'))
+                    if post_time < since_time.replace(tzinfo=post_time.tzinfo):
+                        continue
+                
                 post_data = {
                     'uri': post.uri,
                     'author_handle': post.author.handle,

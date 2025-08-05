@@ -423,7 +423,7 @@ class Client:
                     'handle': follow.handle,
                     'display_name': getattr(follow, 'display_name', ''),
                     'description': getattr(follow, 'description', ''),
-                    'follower_count': getattr(follow, 'followers_count', 0),
+                    'follower_count': getattr(follow, 'follower_count', 0),  # Fixed: follower_count not followers_count
                     'follows_count': getattr(follow, 'follows_count', 0),
                     'posts_count': getattr(follow, 'posts_count', 0),
                     'indexed_at': getattr(follow, 'indexed_at', None),
@@ -431,23 +431,25 @@ class Client:
                 }
                 follows.append(follow_data)
             
-            return follows
+            # Return both follows and cursor for pagination
+            next_cursor = getattr(response, 'cursor', None)
+            return follows, next_cursor
             
         except Exception as e:
             print(f"Error fetching follows: {e}")
-            return []
+            return [], None
     
     def get_all_user_follows(
         self,
         actor: str = None,
-        max_follows: int = 1000
+        max_follows: int = None
     ) -> List[Dict]:
         """
         Get all users that the specified user follows with pagination
         
         Args:
             actor: User handle or DID (defaults to authenticated user)
-            max_follows: Maximum number of follows to fetch
+            max_follows: Maximum number of follows to fetch (None = no limit)
             
         Returns:
             Complete list of followed users
@@ -463,9 +465,16 @@ class Client:
         
         print(f"Fetching following list for {actor}...")
         
-        while len(all_follows) < max_follows:
-            batch_limit = min(100, max_follows - len(all_follows))
-            follows_batch = self.get_user_follows(actor, limit=batch_limit, cursor=cursor)
+        while True:
+            # No limit if max_follows is None, otherwise limit remaining
+            if max_follows is None:
+                batch_limit = 100  # API max per request
+            else:
+                if len(all_follows) >= max_follows:
+                    break
+                batch_limit = min(100, max_follows - len(all_follows))
+            
+            follows_batch, next_cursor = self.get_user_follows(actor, limit=batch_limit, cursor=cursor)
             
             if not follows_batch:
                 break
@@ -473,9 +482,12 @@ class Client:
             all_follows.extend(follows_batch)
             print(f"   Fetched {len(follows_batch)} follows (total: {len(all_follows)})")
             
-            # Check if there's more data (implementation depends on API response structure)
-            # For now, break after first batch - extend if pagination cursor is available
-            break
+            # If no more cursor, we've reached the end
+            if not next_cursor:
+                break
+                
+            # Update cursor for next iteration
+            cursor = next_cursor
         
         print(f"Retrieved {len(all_follows)} total follows for {actor}")
         return all_follows
@@ -534,6 +546,51 @@ class Client:
             print(f"Cache write error: {e}")
         
         return follows
+    
+    def get_profiles(
+        self,
+        actors: List[str]
+    ) -> List[Dict]:
+        """
+        Get detailed profiles for multiple actors using getProfiles endpoint
+        
+        Args:
+            actors: List of DIDs or handles (max 25)
+            
+        Returns:
+            List of detailed profile data with follower/post counts
+        """
+        if not self.authenticated:
+            raise Exception("Must login first. Call client.login(identifier, password)")
+        
+        if len(actors) > 25:
+            raise ValueError("Maximum 25 actors per request")
+            
+        try:
+            params = {'actors': actors}
+            response = self.client.app.bsky.actor.get_profiles(params)
+            
+            profiles = []
+            for profile in response.profiles:
+                profile_data = {
+                    'did': profile.did,
+                    'handle': profile.handle,
+                    'displayName': getattr(profile, 'display_name', ''),
+                    'description': getattr(profile, 'description', ''),
+                    'avatar': getattr(profile, 'avatar', ''),
+                    'followersCount': getattr(profile, 'followers_count', 0),
+                    'followsCount': getattr(profile, 'follows_count', 0),
+                    'postsCount': getattr(profile, 'posts_count', 0),
+                    'indexedAt': getattr(profile, 'indexed_at', None),
+                    'createdAt': getattr(profile, 'created_at', None)
+                }
+                profiles.append(profile_data)
+            
+            return profiles
+            
+        except Exception as e:
+            print(f"Error fetching profiles: {e}")
+            return []
 
     def save_user_data(self, user_data: Dict, filename: str = None):
         """Save user data to JSON file"""
