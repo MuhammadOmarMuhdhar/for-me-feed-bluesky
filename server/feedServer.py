@@ -231,7 +231,7 @@ class FeedServer:
                 }
 
         @self.app.get("/xrpc/app.bsky.feed.getFeedSkeleton")
-        def get_feed_skeleton(request: Request, feed: str):
+        def get_feed_skeleton(request: Request, feed: str, cursor: Optional[str] = None, limit: int = 50):
             try:
                 # Get user from auth header
                 auth_header = request.headers.get('authorization', '')
@@ -248,18 +248,27 @@ class FeedServer:
                         self.handle_user_request(user_did, feed)
                     logger.info(f"Retrieved {len(cached_posts)} personalized posts for user {user_did or 'anonymous'}")
                     
-                    # Split posts into fresh vs old for flowing feed
+                    # Split posts into fresh vs old for cursor-based pagination
                     fresh_posts, old_posts = self.redis_client.split_posts_by_consumption(user_did, cached_posts)
                     
-                    # Create flowing feed: 20 fresh + 80 old = 100 max
-                    MAX_POSTS = 100
-                    fresh_limit = min(20, len(fresh_posts))
-                    old_limit = MAX_POSTS - fresh_limit
-
-                    flowing_feed = fresh_posts[:fresh_limit] + old_posts[:old_limit]
-                    cached_posts = flowing_feed
-                    
-                    logger.info(f"Flowing feed: {len(fresh_posts[:fresh_limit])} fresh + {len(old_posts[:old_limit])} old = {len(flowing_feed)} total posts")
+                    if cursor is None:
+                        # First request: serve fresh posts only
+                        if len(fresh_posts) > 0:
+                            cached_posts = fresh_posts[:limit]
+                            logger.info(f"Serving {len(cached_posts)} fresh posts (no cursor)")
+                        else:
+                            # No fresh posts - serve first page of old posts
+                            cached_posts = old_posts[:limit] 
+                            logger.info(f"No fresh posts - serving {len(cached_posts)} old posts (no cursor)")
+                    else:
+                        # Subsequent request: serve old posts with pagination
+                        try:
+                            offset = int(cursor)
+                            cached_posts = old_posts[offset:offset + limit]
+                            logger.info(f"Serving {len(cached_posts)} old posts from offset {offset}")
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid cursor format: {cursor}, falling back to first page")
+                            cached_posts = old_posts[:limit]
                     
                 else:
                     # POTENTIALLY NEW USER: Serve default feed, track activity and log if new
@@ -268,10 +277,16 @@ class FeedServer:
                     else:
                         logger.info("No user DID extracted from auth header")
                     
-                    # Get default feed
+                    # Get default feed with pagination
                     default_posts = self.redis_client.get_default_feed()
                     if default_posts:
-                        cached_posts = default_posts[:100]  # Apply window to default feed too
+                        offset = 0
+                        if cursor:
+                            try:
+                                offset = int(cursor)
+                            except (ValueError, TypeError):
+                                offset = 0
+                        cached_posts = default_posts[offset:offset + limit]
                         logger.info(f"Serving {len(cached_posts)} default posts to new user {user_did or 'anonymous'}")
                     else:
                         logger.warning("No default posts available for fallback")
@@ -296,7 +311,33 @@ class FeedServer:
                         self.redis_client.mark_posts_consumed(user_did, served_uris)
                         logger.debug(f"Marked {len(served_uris)} posts as consumed for user {user_did}")
                 
+                # Generate cursor for next page
+                next_cursor = None
+                if user_did and cached_posts:
+                    # Get fresh/old posts for cursor calculation
+                    fresh_posts, old_posts = self.redis_client.split_posts_by_consumption(user_did, self.redis_client.get_user_feed(user_did) or [])
+                    
+                    if cursor is None:
+                        # First request served fresh posts, next cursor starts old posts
+                        if len(old_posts) > 0:
+                            next_cursor = str(0)  # Start old posts from beginning
+                    else:
+                        # Subsequent request, check if more old posts available
+                        current_offset = int(cursor) if cursor else 0
+                        next_offset = current_offset + limit
+                        if next_offset < len(old_posts):
+                            next_cursor = str(next_offset)
+                elif not user_did and cached_posts:
+                    # Default feed pagination
+                    default_posts = self.redis_client.get_default_feed() or []
+                    current_offset = int(cursor) if cursor else 0
+                    next_offset = current_offset + limit
+                    if next_offset < len(default_posts):
+                        next_cursor = str(next_offset)
+                
                 response = {"feed": feed_items}
+                if next_cursor:
+                    response["cursor"] = next_cursor
                 
                 logger.info(f"Served {len(feed_items)} posts to user {user_did or 'anonymous'}")
                 return response
