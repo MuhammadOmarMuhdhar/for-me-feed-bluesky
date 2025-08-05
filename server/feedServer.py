@@ -257,8 +257,8 @@ class FeedServer:
                             cached_posts = fresh_posts[:limit]
                             logger.info(f"Serving {len(cached_posts)} fresh posts (no cursor)")
                         else:
-                            # No fresh posts - serve first page of old posts
-                            cached_posts = old_posts[:limit] 
+                            # No fresh posts - serve first page of old posts (reversed for static feed)
+                            cached_posts = old_posts[::-1][:limit] 
                             logger.info(f"No fresh posts - serving {len(cached_posts)} old posts (no cursor)")
                     else:
                         # Subsequent request: serve old posts with pagination
