@@ -450,7 +450,7 @@ def prioritize_follows_by_ratio(following_list: List[Dict], posts_client, std_de
             z_scores = [0.0] * len(user_ratios)
         
         # Threshold: keep users above +0.0 standard deviations
-        z_threshold = -0.25
+        z_threshold = -0.30
         
         # Filter users above z-score threshold
         filtered_users = []
@@ -600,9 +600,9 @@ def collect_comprehensive_posts(
             # Use user keywords if available
             if user_keywords:
                 keyword_posts = posts_client.get_posts_with_user_keywords(
-                    user_keywords=user_keywords[:10],  # Limit to top 10 keywords
-                    target_count=100,
-                    generic_ratio=0.1,  # 10% generic trending posts
+                    user_keywords=user_keywords,  
+                    target_count=1000,
+                    generic_ratio=0.01,  # 1% generic trending posts
                     time_hours=6
                 )
             else:
@@ -782,6 +782,113 @@ def filter_blocked_posts(posts: List[Dict], blocked_users: set) -> List[Dict]:
     
     return filtered_posts
 
+def calculate_post_age_minutes(post: Dict) -> float:
+    """
+    Calculate post age in minutes from created_at timestamp
+    
+    Args:
+        post: Post dictionary with timestamp fields
+        
+    Returns:
+        Age in minutes, or 0 if timestamp cannot be parsed
+    """
+    try:
+        # Try different timestamp fields
+        timestamp_str = None
+        for field in ['created_at', 'createdAt', 'indexed_at', 'indexedAt']:
+            if field in post:
+                timestamp_str = post[field]
+                break
+        
+        if not timestamp_str:
+            return 0.0
+        
+        # Parse timestamp
+        if isinstance(timestamp_str, str):
+            post_time = parser.parse(timestamp_str)
+        else:
+            return 0.0
+        
+        # Calculate age in minutes
+        now = datetime.now(timezone.utc)
+        if post_time.tzinfo is None:
+            post_time = post_time.replace(tzinfo=timezone.utc)
+        
+        age_delta = now - post_time
+        age_minutes = age_delta.total_seconds() / 60.0
+        return max(0.0, age_minutes)  # Ensure non-negative
+        
+    except Exception as e:
+        logger.debug(f"Could not parse post timestamp: {e}")
+        return 0.0
+
+
+def calculate_engagement_velocity(post: Dict, age_minutes: float) -> float:
+    """
+    Calculate total engagement per minute
+    
+    Args:
+        post: Post dictionary with engagement metrics
+        age_minutes: Post age in minutes
+        
+    Returns:
+        Engagement velocity (engagements per minute)
+    """
+    try:
+        likes = post.get('like_count', 0)
+        reposts = post.get('repost_count', 0) 
+        replies = post.get('reply_count', 0)
+        
+        # Weighted engagement: likes + (reposts * 2) + (replies * 1.5)
+        total_engagement = likes + (reposts * 2) + (replies * 1.5)
+        
+        # Handle very fresh posts (< 1 minute) to avoid division issues
+        if age_minutes < 1.0:
+            age_minutes = 1.0
+        
+        velocity = total_engagement / age_minutes
+        return max(0.0, velocity)
+        
+    except Exception as e:
+        logger.debug(f"Could not calculate engagement velocity: {e}")
+        return 0.0
+
+
+def is_viral_post(post: Dict, age_threshold: float = 45.0, velocity_threshold: float = 1.0) -> bool:
+    """
+    Determine if post qualifies for viral boost
+    
+    Args:
+        post: Post dictionary
+        age_threshold: Maximum age in minutes for viral consideration
+        velocity_threshold: Minimum engagement velocity required
+        
+    Returns:
+        True if post should receive viral boost
+    """
+    try:
+        # Only check feed and network posts (not keyword posts)
+        source = post.get('source', '')
+        if source not in ['feed', 'network']:
+            return False
+        
+        # Check age constraint
+        age_minutes = calculate_post_age_minutes(post)
+        if age_minutes <= 0 or age_minutes > age_threshold:
+            return False
+        
+        # Check engagement velocity
+        velocity = calculate_engagement_velocity(post, age_minutes)
+        if velocity < velocity_threshold:
+            return False
+        
+        return True
+        
+    except Exception as e:
+        logger.debug(f"Error in viral detection: {e}")
+        return False
+
+
 def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
     """Calculate BM25 rankings with feed similarity boosting and combined scoring"""
     try:
@@ -818,16 +925,31 @@ def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dic
                 post['priority_boost'] = priority_boost
                 post['boost_reason'] = 'feed_priority'
             else:
-                # Search posts: No boost, pure BM25 merit
-                priority_boost = bm25_score
+                # Keyword posts: Apply 70% penalty to counter collection bias
+                keyword_penalty = 0.3  # 30% of original score = 70% penalty
+                priority_boost = bm25_score * keyword_penalty
                 post['priority_boost'] = priority_boost
-                post['boost_reason'] = 'merit_only'
+                post['boost_reason'] = 'keyword_penalty'
             
             # Final score = BM25 + Priority Boost
             final_score = bm25_score + priority_boost
             post['final_score'] = final_score
         
-        # Sort by final score (BM25 + priority_boost)
+        # Apply viral boost to qualifying posts
+        viral_boosted_count = 0
+        for post in ranked_posts:
+            if is_viral_post(post):
+                original_score = post['final_score']
+                viral_multiplier = 1.8  # 80% boost for viral content
+                post['final_score'] = original_score * viral_multiplier
+                post['viral_boost'] = True
+                post['viral_multiplier'] = viral_multiplier
+                post['original_score'] = original_score
+                viral_boosted_count += 1
+            else:
+                post['viral_boost'] = False
+        
+        # Sort by final score (after viral boost applied)
         ranked_posts = sorted(ranked_posts, key=lambda x: x.get('final_score', 0), reverse=True)
         
         # Log scoring statistics
@@ -850,6 +972,35 @@ def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dic
         if feed_posts:
             avg_feed_boost = sum(p.get('priority_boost', 0) for p in feed_posts) / len(feed_posts)
             logger.info(f"Average feed priority boost: {avg_feed_boost:.2f}")
+        
+        if keyword_posts:
+            avg_keyword_penalty = sum(p.get('priority_boost', 0) for p in keyword_posts) / len(keyword_posts)
+            avg_keyword_bm25 = sum(p.get('bm25_score', 0) for p in keyword_posts) / len(keyword_posts)
+            keyword_in_top_50 = sum(1 for post in ranked_posts[:50] if post.get('source') == 'keyword')
+            logger.info(f"Average keyword penalty boost: {avg_keyword_penalty:.2f} (70% penalty applied)")
+            logger.info(f"Average keyword BM25 before penalty: {avg_keyword_bm25:.2f}")
+            logger.info(f"Keyword posts in top 50: {keyword_in_top_50} ({keyword_in_top_50/min(50, len(ranked_posts))*100:.1f}%)")
+        
+        # Log viral boost statistics
+        if viral_boosted_count > 0:
+            viral_posts = [p for p in ranked_posts if p.get('viral_boost', False)]
+            viral_in_top_20 = sum(1 for post in ranked_posts[:20] if post.get('viral_boost', False))
+            avg_viral_multiplier = sum(p.get('viral_multiplier', 0) for p in viral_posts) / len(viral_posts)
+            avg_original_score = sum(p.get('original_score', 0) for p in viral_posts) / len(viral_posts)
+            avg_boosted_score = sum(p.get('final_score', 0) for p in viral_posts) / len(viral_posts)
+            
+            logger.info(f"Viral boost applied to {viral_boosted_count} posts (multiplier: {avg_viral_multiplier:.1f}x)")
+            logger.info(f"Viral posts in top 20: {viral_in_top_20} ({viral_in_top_20/min(20, len(ranked_posts))*100:.1f}%)")
+            logger.info(f"Average viral scores: {avg_original_score:.2f} -> {avg_boosted_score:.2f}")
+            
+            # Log sample viral post details for debugging
+            if viral_posts:
+                sample_viral = viral_posts[0]
+                age_minutes = calculate_post_age_minutes(sample_viral)
+                velocity = calculate_engagement_velocity(sample_viral, age_minutes)
+                logger.info(f"Sample viral post: age={age_minutes:.1f}min, velocity={velocity:.2f} eng/min, source={sample_viral.get('source')}")
+        else:
+            logger.info("No posts qualified for viral boost")
         
         return ranked_posts
         
