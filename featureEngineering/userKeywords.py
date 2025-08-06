@@ -1,7 +1,7 @@
 import sys
 import os
-from collections import Counter
-from typing import Dict, List, Set
+from collections import Counter, defaultdict
+from typing import Dict, List, Set, Tuple
 import math
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -237,3 +237,207 @@ def extract_keywords_with_fallback(user_data: Dict, top_k: int = 10, min_posts: 
         keywords = list(dict.fromkeys(keywords))  # Remove duplicates while preserving order
     
     return keywords[:top_k]
+
+
+def extract_enhanced_user_keywords(user_data: Dict, top_k: int = 100, min_freq: int = 1) -> Tuple[Dict, int]:
+    """
+    Extract keywords with sentiment/emotion scores + calculate user reading level
+    
+    Args:
+        user_data: User's posts, reposts, replies, likes data
+        top_k: Number of top keywords to return
+        min_freq: Minimum frequency for a term to be considered
+        
+    Returns:
+        Tuple of (enhanced_keywords_dict, user_reading_level)
+    """
+    from textblob import TextBlob
+    from nrclex import NRCLex
+    import textstat
+    
+    print(f"Extracting enhanced keywords with NLP analysis for {top_k} keywords...")
+    
+    # First get the basic keywords using existing TF-IDF approach
+    basic_keywords = extract_user_keywords(user_data, top_k, min_freq)
+    
+    if not basic_keywords:
+        print("No basic keywords found, returning empty enhanced keywords")
+        return {}, 8  # Default reading level
+    
+    # Collect user text by content type for analysis
+    all_texts = []
+    reading_level_texts = []
+    keyword_texts = defaultdict(list)  # keyword -> list of texts containing that keyword
+    
+    # Content type weights for analysis
+    content_weights = {
+        'posts': 1.0,     # Original content = strongest signal
+        'likes': 0.8,     # What they like = strong signal  
+        'reposts': 0.7,   # What they share = good signal
+        'replies': 0.5    # Replies = weaker signal (often reactive)
+    }
+    
+    print("Analyzing content for NLP features...")
+    
+    # Collect all texts and map keywords to texts
+    for content_type, weight in content_weights.items():
+        for item in user_data.get(content_type, []):
+            text = item.get('text', '').strip()
+            if len(text) < 15:  # Skip very short content
+                continue
+                
+            all_texts.append(text)
+            reading_level_texts.append(text)
+            
+            # Find which keywords appear in this text
+            text_lower = text.lower()
+            for keyword in basic_keywords:
+                if keyword.lower() in text_lower:
+                    keyword_texts[keyword].append(text)
+    
+    if not all_texts:
+        print("No valid texts found for NLP analysis")
+        return {}, 8
+    
+    print(f"Analyzing {len(all_texts)} texts for {len(basic_keywords)} keywords")
+    
+    # Calculate user's average reading level
+    reading_levels = []
+    for text in reading_level_texts[:50]:  # Limit to 50 texts for performance
+        try:
+            level = textstat.flesch_kincaid_grade(text)
+            if 1 <= level <= 20:  # Reasonable bounds
+                reading_levels.append(level)
+        except Exception:
+            continue
+    
+    user_reading_level = int(np.mean(reading_levels)) if reading_levels else 8
+    print(f"Calculated user reading level: {user_reading_level}")
+    
+    # Analyze each keyword for sentiment and emotions
+    enhanced_keywords = {}
+    
+    for keyword in basic_keywords:
+        texts_for_keyword = keyword_texts.get(keyword, [])
+        
+        if not texts_for_keyword:
+            # Keyword might be from TF-IDF processing, skip if no direct text matches
+            continue
+        
+        print(f"Analyzing keyword '{keyword}' with {len(texts_for_keyword)} text examples")
+        
+        # Initialize analysis containers
+        polarities = []
+        subjectivities = []
+        joy_scores = []
+        anger_scores = []
+        trust_scores = []
+        fear_scores = []
+        surprise_scores = []
+        
+        # Analyze each text containing this keyword
+        for text in texts_for_keyword:
+            try:
+                # Sentiment analysis with TextBlob
+                blob = TextBlob(text)
+                polarities.append(blob.sentiment.polarity)
+                subjectivities.append(blob.sentiment.subjectivity)
+                
+                # Emotion analysis with NRCLex
+                emotion = NRCLex(text)
+                
+                # Get emotion scores from raw_emotion_scores
+                emotions = emotion.raw_emotion_scores
+                
+                # NRCLex returns counts, normalize by text length to get intensity scores 0-1
+                text_words = len(text.split())
+                normalization_factor = max(1, text_words)
+                
+                joy_scores.append(min(1.0, emotions.get('joy', 0) / normalization_factor))
+                anger_scores.append(min(1.0, emotions.get('anger', 0) / normalization_factor))
+                trust_scores.append(min(1.0, emotions.get('trust', 0) / normalization_factor))
+                fear_scores.append(min(1.0, emotions.get('fear', 0) / normalization_factor))
+                surprise_scores.append(min(1.0, emotions.get('surprise', 0) / normalization_factor))
+                
+            except Exception as e:
+                print(f"Warning: NLP analysis failed for keyword '{keyword}': {e}")
+                continue
+        
+        # Skip keywords with insufficient analysis data (need at least 1 example)
+        if len(polarities) < 1:
+            continue
+        
+        # Calculate averages for this keyword
+        enhanced_keywords[keyword] = {
+            'frequency': len(texts_for_keyword),
+            'sentiment': {
+                'avg_polarity': float(np.mean(polarities)),
+                'avg_subjectivity': float(np.mean(subjectivities))
+            },
+            'emotions': {
+                'joy': float(np.mean(joy_scores)),
+                'anger': float(np.mean(anger_scores)), 
+                'trust': float(np.mean(trust_scores)),
+                'fear': float(np.mean(fear_scores)),
+                'surprise': float(np.mean(surprise_scores))
+            }
+        }
+    
+    print(f"Enhanced analysis complete: {len(enhanced_keywords)} keywords with NLP scores")
+    
+    # Log sample results for debugging
+    if enhanced_keywords:
+        sample_keyword = list(enhanced_keywords.keys())[0]
+        sample_data = enhanced_keywords[sample_keyword]
+        print(f"Sample keyword '{sample_keyword}': sentiment={sample_data['sentiment']}, emotions={sample_data['emotions']}")
+    
+    return enhanced_keywords, user_reading_level
+
+
+def extract_enhanced_user_keywords_with_fallback(user_data: Dict, top_k: int = 100, min_freq: int = 1, min_content: int = 5) -> Tuple[Dict, int]:
+    """
+    Extract enhanced keywords with fallback for users with insufficient content
+    
+    Args:
+        user_data: User's engagement data
+        top_k: Number of keywords to return
+        min_freq: Minimum frequency for keywords
+        min_content: Minimum content required for full analysis
+        
+    Returns:
+        Tuple of (enhanced_keywords_dict, reading_level)
+    """
+    # Check if user has enough content for meaningful analysis
+    total_content = (
+        len(user_data.get('posts', [])) + 
+        len(user_data.get('reposts', [])) + 
+        len(user_data.get('replies', [])) + 
+        len(user_data.get('likes', []))
+    )
+    
+    if total_content < min_content:
+        print(f"User has insufficient content ({total_content} items) - using fallback")
+        # Return minimal enhanced keywords with neutral sentiment/emotions
+        fallback_keywords = get_fallback_keywords()[:min(top_k, 20)]
+        
+        enhanced_fallback = {}
+        for keyword in fallback_keywords:
+            enhanced_fallback[keyword] = {
+                'frequency': 1,
+                'sentiment': {
+                    'avg_polarity': 0.0,
+                    'avg_subjectivity': 0.5
+                },
+                'emotions': {
+                    'joy': 0.3,
+                    'anger': 0.1,
+                    'trust': 0.5,
+                    'fear': 0.2,
+                    'surprise': 0.3
+                }
+            }
+        
+        return enhanced_fallback, 8  # Default reading level
+    
+    # Use full enhanced analysis
+    return extract_enhanced_user_keywords(user_data, top_k, min_freq)

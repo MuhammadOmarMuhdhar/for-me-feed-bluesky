@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from client.bluesky.userData import Client as BlueskyUserDataClient
 from client.bigQuery import Client as BigQueryClient
-from featureEngineering.userKeywords import extract_user_keywords
+from featureEngineering.userKeywords import extract_enhanced_user_keywords_with_fallback
 from featureEngineering.encoder import embed_posts
 
 
@@ -202,8 +202,8 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
             logger.warning(f"User {user_profile.get('handle')} has insufficient content ({total_items} items)")
             return None
         
-        # Extract keywords and generate single user embedding from user content
-        keywords = extract_user_keywords(user_data, top_k=100, min_freq=1)
+        # Extract enhanced keywords with NLP analysis and calculate reading level
+        enhanced_keywords, reading_level = extract_enhanced_user_keywords_with_fallback(user_data, top_k=100, min_freq=1)
         
         # Generate single embedding by combining all user posts
         all_posts = embed_posts(user_data)
@@ -216,8 +216,8 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
             user_embedding = np.mean(embeddings_matrix, axis=0).tolist()
             logger.info(f"Generated single user embedding of size {len(user_embedding)} from {len(all_posts)} posts")
         
-        if not keywords:
-            logger.warning(f"No keywords extracted for user {user_profile.get('handle')}")
+        if not enhanced_keywords:
+            logger.warning(f"No enhanced keywords extracted for user {user_profile.get('handle')}")
             return None
             
         if not user_embedding:
@@ -228,12 +228,13 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
         processed_user = {
             'user_id': user_did,
             'handle': user_profile.get('handle', ''),
-            'keywords': keywords,  # Store as JSON array
+            'keywords': enhanced_keywords,  # Store enhanced keywords as JSON dict
             'embeddings': user_embedding,  # Single embedding vector
+            'reading_level': reading_level,  # User's reading level
             'updated_at': datetime.utcnow()
         }
         
-        logger.info(f"Extracted {len(keywords)} keywords for user {user_profile.get('handle')}")
+        logger.info(f"Extracted {len(enhanced_keywords)} enhanced keywords and reading level {reading_level} for user {user_profile.get('handle')}")
         return processed_user
         
     except Exception as e:
@@ -251,6 +252,7 @@ def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, 
         SET handle = @handle,
             keywords = @keywords,
             embeddings = @embeddings,
+            reading_level = @reading_level,
             updated_at = CURRENT_TIMESTAMP()
         WHERE user_id = @user_id
         """
@@ -260,6 +262,7 @@ def update_user_profile_in_bigquery(bq_client: BigQueryClient, user_data: Dict, 
                 bigquery.ScalarQueryParameter("handle", "STRING", user_data['handle']),
                 bigquery.ScalarQueryParameter("keywords", "JSON", user_data['keywords']),
                 bigquery.ScalarQueryParameter("embeddings", "JSON", user_data['embeddings']),
+                bigquery.ScalarQueryParameter("reading_level", "INT64", user_data['reading_level']),
                 bigquery.ScalarQueryParameter("user_id", "STRING", user_data['user_id'])
             ]
         )

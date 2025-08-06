@@ -13,3 +13,6 @@ uvicorn==0.24.0
 pandas==2.1.4
 google-cloud-bigquery==3.13.0
 db-dtypes==1.2.0
+textblob==0.15.3
+nrclex==3.0.0
+textstat==0.7.8
