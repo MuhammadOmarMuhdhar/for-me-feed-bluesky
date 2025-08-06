@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+import pytz
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,6 +25,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def is_update_time() -> bool:
+    """
+    Check if current time is 2 AM Pacific Time
+    
+    Returns:
+        True if current time is 2 AM Pacific, False otherwise
+    """
+    try:
+        # Get current UTC time
+        utc_now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        
+        # Convert to Pacific Time
+        pacific_tz = pytz.timezone('US/Pacific')
+        pacific_now = utc_now.astimezone(pacific_tz)
+        
+        # Check if it's 2 AM Pacific (hour == 2)
+        return pacific_now.hour == 2
+        
+    except Exception as e:
+        logger.error(f"Failed to check update time: {e}")
+        return False
+
+
 def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: datetime) -> List[Dict]:
     """
     Get users from BigQuery who need their profile data populated
@@ -37,7 +61,7 @@ def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: d
     """
     try:
         query = f"""
-        SELECT DISTINCT user_id, last_request_at, request_count
+        SELECT DISTINCT user_id, last_request_at, request_count, password
         FROM `{bq_client.project_id}.data.users`
         WHERE (handle = '' OR handle IS NULL) OR embeddings IS NULL
         AND last_request_at >= '{since_timestamp.isoformat()}'
@@ -55,7 +79,8 @@ def get_users_needing_profile_data(bq_client: BigQueryClient, since_timestamp: d
         for _, row in result.iterrows():
             users_needing_data.append({
                 'user_did': row['user_id'],
-                'request_count': row['request_count']
+                'request_count': row['request_count'],
+                'app_password': row.get('password', '')
             })
         
         logger.info(f"Found {len(users_needing_data)} users needing profile data")
@@ -82,6 +107,47 @@ def get_existing_users_from_bigquery(bq_client: BigQueryClient) -> set:
     except Exception as e:
         logger.warning(f"Failed to get existing users from BigQuery: {e}")
         return set()
+
+def get_all_users_for_update(bq_client: BigQueryClient) -> List[Dict]:
+    """
+    Get all users from BigQuery for daily bulk updates
+    
+    Args:
+        bq_client: BigQuery client
+        
+    Returns:
+        List of all user data for bulk updates
+    """
+    try:
+        query = f"""
+        SELECT user_id, handle, password
+        FROM `{bq_client.project_id}.data.users`
+        WHERE user_id LIKE 'did:plc:%'
+        AND handle IS NOT NULL
+        AND handle != ''
+        ORDER BY updated_at ASC
+        """
+        
+        result = bq_client.query(query)
+        
+        if result.empty:
+            logger.info("No users found for bulk update")
+            return []
+        
+        users_for_update = []
+        for _, row in result.iterrows():
+            users_for_update.append({
+                'user_did': row['user_id'],
+                'handle': row.get('handle', ''),
+                'app_password': row.get('password', '')
+            })
+        
+        logger.info(f"Found {len(users_for_update)} users for bulk update")
+        return users_for_update
+        
+    except Exception as e:
+        logger.error(f"Failed to get users for bulk update: {e}")
+        return []
 
 def get_user_profile_from_did(client: BlueskyUserDataClient, user_did: str) -> Optional[Dict]:
     """Get user profile information from their DID"""
@@ -213,14 +279,27 @@ def main():
     parser.add_argument('--log-file', default='/var/log/feed-server.log', help='Path to feed server log file')
     parser.add_argument('--hours-back', type=int, default=1, help='Hours to look back in logs')
     parser.add_argument('--dry-run', action='store_true', help='Run without storing to BigQuery')
+    parser.add_argument('--bulk-update', action='store_true', help='Manually update all users keywords/embeddings regardless of time')
     
     args = parser.parse_args()
     
     batch_id = f"user_discovery_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     since_timestamp = datetime.now() - timedelta(hours=args.hours_back)
     
-    logger.info(f"Starting User Discovery ETL (batch_id={batch_id})")
-    logger.info(f"Processing logs since: {since_timestamp}")
+    # Check if it's time for daily bulk updates or manual bulk update requested
+    is_auto_bulk_update_time = is_update_time()
+    is_manual_bulk_update = args.bulk_update
+    is_bulk_update_mode = is_auto_bulk_update_time or is_manual_bulk_update
+    
+    if is_manual_bulk_update:
+        logger.info(f"Starting Manual Bulk Update ETL (batch_id={batch_id})")
+        logger.info("Manually updating ALL users' keywords and embeddings")
+    elif is_auto_bulk_update_time:
+        logger.info(f"Starting Daily Bulk Update ETL (batch_id={batch_id})")
+        logger.info("Updating ALL users' keywords and embeddings at 2 AM Pacific")
+    else:
+        logger.info(f"Starting User Discovery ETL (batch_id={batch_id})")
+        logger.info(f"Processing logs since: {since_timestamp}")
     
     try:
         # Initialize clients
@@ -230,33 +309,54 @@ def main():
         bluesky_client = BlueskyUserDataClient()
         bluesky_client.login()
         
-        # Get users needing profile data from BigQuery
-        users_needing_data = get_users_needing_profile_data(bq_client, since_timestamp)
+        # Choose workflow based on time or manual flag
+        if is_bulk_update_mode:
+            # Get all users for bulk update
+            users_to_process = get_all_users_for_update(bq_client)
+        else:
+            # Get users needing profile data from BigQuery
+            users_to_process = get_users_needing_profile_data(bq_client, since_timestamp)
         
-        if not users_needing_data:
-            logger.info("No users needing profile data found")
+        if not users_to_process:
+            if is_bulk_update_mode:
+                logger.info("No users found for bulk update")
+            else:
+                logger.info("No users needing profile data found")
             return
         
-        logger.info(f"Found {len(users_needing_data)} users needing profile data")
+        if is_bulk_update_mode:
+            logger.info(f"Found {len(users_to_process)} users for bulk update")
+        else:
+            logger.info(f"Found {len(users_to_process)} users needing profile data")
         
         success_count = 0
         error_count = 0
         
-        for user_request in users_needing_data:
+        for user_request in users_to_process:
             user_did = user_request['user_did']
             
             try:
-                logger.info(f"Processing new user: {user_did}")
-                
-                # Get user profile
-                user_profile = get_user_profile_from_did(bluesky_client, user_did)
-                if not user_profile:
-                    logger.warning(f"Could not get profile for user {user_did}")
-                    error_count += 1
-                    continue
+                if is_bulk_update_mode:
+                    if is_manual_bulk_update:
+                        logger.info(f"Manually bulk updating user: {user_request.get('handle', user_did)}")
+                    else:
+                        logger.info(f"Daily bulk updating user: {user_request.get('handle', user_did)}")
+                    # For bulk updates, use existing handle data
+                    user_profile = {
+                        'did': user_did,
+                        'handle': user_request.get('handle', '')
+                    }
+                else:
+                    logger.info(f"Processing new user: {user_did}")
+                    # Get user profile for new users
+                    user_profile = get_user_profile_from_did(bluesky_client, user_did)
+                    if not user_profile:
+                        logger.warning(f"Could not get profile for user {user_did}")
+                        error_count += 1
+                        continue
                 
                 # Collect and process user data
-                processed_user = collect_and_process_user_data(bluesky_client, user_did, user_profile)
+                processed_user = collect_and_process_user_data(bluesky_client, user_did, user_profile, user_request.get('app_password'))
                 if not processed_user:
                     logger.warning(f"Could not process user data for {user_profile.get('handle', user_did)}")
                     error_count += 1
@@ -280,9 +380,18 @@ def main():
                 continue
         
         # Final summary
-        logger.info(f"User Discovery ETL Complete!")
-        logger.info(f"Success: {success_count}, Errors: {error_count}")
-        logger.info(f"New active users ready for feed ranking")
+        if is_manual_bulk_update:
+            logger.info(f"Manual Bulk Update ETL Complete!")
+            logger.info(f"Success: {success_count}, Errors: {error_count}")
+            logger.info(f"All users' keywords and embeddings manually refreshed")
+        elif is_auto_bulk_update_time:
+            logger.info(f"Daily Bulk Update ETL Complete!")
+            logger.info(f"Success: {success_count}, Errors: {error_count}")
+            logger.info(f"All users' keywords and embeddings refreshed")
+        else:
+            logger.info(f"User Discovery ETL Complete!")
+            logger.info(f"Success: {success_count}, Errors: {error_count}")
+            logger.info(f"New active users ready for feed ranking")
         
     except Exception as e:
         logger.error(f"User Discovery ETL failed: {e}")
