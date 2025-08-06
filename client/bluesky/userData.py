@@ -46,7 +46,7 @@ class Client:
         
         Args:
             actor: User handle or DID (defaults to authenticated user)
-            limit: Number of likes to fetch (max 100 per request)
+            limit: Number of likes to fetch (supports > 100 via pagination)
             cursor: Pagination cursor
             
         Returns:
@@ -59,6 +59,54 @@ class Client:
         if not actor:
             actor = self.client.me.handle
         
+        # If limit <= 100, use single request (existing behavior)
+        if limit <= 100:
+            return self._get_user_likes_batch(actor, limit, cursor)
+        
+        # If limit > 100, use cursor pagination
+        all_likes = []
+        current_cursor = cursor
+        
+        while len(all_likes) < limit:
+            # Calculate how many to fetch in this batch
+            remaining = limit - len(all_likes)
+            batch_limit = min(100, remaining)
+            
+            batch_likes = self._get_user_likes_batch(actor, batch_limit, current_cursor)
+            
+            if not batch_likes:
+                break
+            
+            all_likes.extend(batch_likes)
+            
+            # Get cursor for next batch - need to make API call to get cursor
+            try:
+                params = {
+                    'actor': actor,
+                    'limit': batch_limit
+                }
+                if current_cursor:
+                    params['cursor'] = current_cursor
+                    
+                response = self.client.app.bsky.feed.get_actor_likes(params)
+                current_cursor = getattr(response, 'cursor', None)
+                
+                if not current_cursor:
+                    break
+                    
+            except Exception as e:
+                print(f"Error getting cursor for likes pagination: {e}")
+                break
+        
+        return all_likes
+    
+    def _get_user_likes_batch(
+        self,
+        actor: str,
+        limit: int,
+        cursor: str = None
+    ) -> List[Dict]:
+        """Internal method to fetch a single batch of likes"""
         try:
             params = {
                 'actor': actor,
@@ -112,7 +160,7 @@ class Client:
         
         Args:
             actor: User handle or DID (defaults to authenticated user)
-            limit: Number of reposts to fetch
+            limit: Number of reposts to fetch (supports > 100 via pagination)
             cursor: Pagination cursor
             
         Returns:
@@ -124,6 +172,55 @@ class Client:
         if not actor:
             actor = self.client.me.handle
         
+        # If limit <= 100, use single request (existing behavior)
+        if limit <= 100:
+            return self._get_user_reposts_batch(actor, limit, cursor)
+        
+        # If limit > 100, use cursor pagination
+        all_reposts = []
+        current_cursor = cursor
+        
+        while len(all_reposts) < limit:
+            # Calculate how many to fetch in this batch
+            remaining = limit - len(all_reposts)
+            batch_limit = min(100, remaining)
+            
+            batch_reposts = self._get_user_reposts_batch(actor, batch_limit, current_cursor)
+            
+            if not batch_reposts:
+                break
+            
+            all_reposts.extend(batch_reposts)
+            
+            # Get cursor for next batch
+            try:
+                params = {
+                    'actor': actor,
+                    'limit': batch_limit,
+                    'filter': 'posts_and_author_threads'
+                }
+                if current_cursor:
+                    params['cursor'] = current_cursor
+                    
+                response = self.client.app.bsky.feed.get_author_feed(params)
+                current_cursor = getattr(response, 'cursor', None)
+                
+                if not current_cursor:
+                    break
+                    
+            except Exception as e:
+                print(f"Error getting cursor for reposts pagination: {e}")
+                break
+        
+        return all_reposts
+    
+    def _get_user_reposts_batch(
+        self,
+        actor: str,
+        limit: int,
+        cursor: str = None
+    ) -> List[Dict]:
+        """Internal method to fetch a single batch of reposts"""
         try:
             # Get user's feed to find reposts
             params = {
@@ -182,7 +279,7 @@ class Client:
         
         Args:
             actor: User handle or DID (defaults to authenticated user)
-            limit: Number of posts to fetch
+            limit: Number of posts to fetch (supports > 100 via pagination)
             cursor: Pagination cursor
             
         Returns:
@@ -194,6 +291,55 @@ class Client:
         if not actor:
             actor = self.client.me.handle
         
+        # If limit <= 100, use single request (existing behavior)
+        if limit <= 100:
+            return self._get_user_posts_batch(actor, limit, cursor)
+        
+        # If limit > 100, use cursor pagination
+        all_posts = []
+        current_cursor = cursor
+        
+        while len(all_posts) < limit:
+            # Calculate how many to fetch in this batch
+            remaining = limit - len(all_posts)
+            batch_limit = min(100, remaining)
+            
+            batch_posts = self._get_user_posts_batch(actor, batch_limit, current_cursor)
+            
+            if not batch_posts:
+                break
+            
+            all_posts.extend(batch_posts)
+            
+            # Get cursor for next batch
+            try:
+                params = {
+                    'actor': actor,
+                    'limit': batch_limit,
+                    'filter': 'posts_no_replies'
+                }
+                if current_cursor:
+                    params['cursor'] = current_cursor
+                    
+                response = self.client.app.bsky.feed.get_author_feed(params)
+                current_cursor = getattr(response, 'cursor', None)
+                
+                if not current_cursor:
+                    break
+                    
+            except Exception as e:
+                print(f"Error getting cursor for posts pagination: {e}")
+                break
+        
+        return all_posts
+    
+    def _get_user_posts_batch(
+        self,
+        actor: str,
+        limit: int,
+        cursor: str = None
+    ) -> List[Dict]:
+        """Internal method to fetch a single batch of posts"""
         try:
             params = {
                 'actor': actor,
@@ -249,7 +395,7 @@ class Client:
         
         Args:
             actor: User handle or DID (defaults to authenticated user)
-            limit: Number of replies to fetch
+            limit: Number of replies to fetch (supports > 100 via pagination)
             cursor: Pagination cursor
             
         Returns:
@@ -261,6 +407,55 @@ class Client:
         if not actor:
             actor = self.client.me.handle
         
+        # If limit <= 100, use single request (existing behavior)
+        if limit <= 100:
+            return self._get_user_replies_batch(actor, limit, cursor)
+        
+        # If limit > 100, use cursor pagination
+        all_replies = []
+        current_cursor = cursor
+        
+        while len(all_replies) < limit:
+            # Calculate how many to fetch in this batch
+            remaining = limit - len(all_replies)
+            batch_limit = min(100, remaining)
+            
+            batch_replies = self._get_user_replies_batch(actor, batch_limit, current_cursor)
+            
+            if not batch_replies:
+                break
+            
+            all_replies.extend(batch_replies)
+            
+            # Get cursor for next batch
+            try:
+                params = {
+                    'actor': actor,
+                    'limit': batch_limit,
+                    'filter': 'posts_with_replies'
+                }
+                if current_cursor:
+                    params['cursor'] = current_cursor
+                    
+                response = self.client.app.bsky.feed.get_author_feed(params)
+                current_cursor = getattr(response, 'cursor', None)
+                
+                if not current_cursor:
+                    break
+                    
+            except Exception as e:
+                print(f"Error getting cursor for replies pagination: {e}")
+                break
+        
+        return all_replies
+    
+    def _get_user_replies_batch(
+        self,
+        actor: str,
+        limit: int,
+        cursor: str = None
+    ) -> List[Dict]:
+        """Internal method to fetch a single batch of replies"""
         try:
             params = {
                 'actor': actor,

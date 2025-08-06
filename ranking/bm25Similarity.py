@@ -24,10 +24,10 @@ def build_user_query_terms(user_data: Dict) -> List[str]:
     
     # Extract terms with weights
     content_types = [
-        ('posts', 2),     
-        ('reposts', 3),   
-        ('replies', 1.5), 
-        ('likes', 3)     
+        ('posts', 1),     
+        ('reposts', 1),   
+        ('replies', 1), 
+        ('likes', 1)     
     ]
     
     for content_type, weight in content_types:

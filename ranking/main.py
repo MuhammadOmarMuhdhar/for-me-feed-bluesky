@@ -144,7 +144,7 @@ def rank_posts(
         Posts ranked by combined similarity score
     """
     if weights is None:
-        weights = {'posts': 2.0, 'reposts': 3.0, 'replies': 1.5, 'likes': 1.0}
+        weights = {'posts': 1.0, 'reposts': 1.0, 'replies': 1.0, 'likes': 1.0}
     
     print(f"Ranking {len(posts_with_embeddings)} posts using methods: {methods}")
     print(f"Content weights: {weights}")

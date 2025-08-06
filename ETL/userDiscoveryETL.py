@@ -179,9 +179,10 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
                 include_likes=True,           # Include likes with app password
                 likes_username=user_handle,   # User's handle for likes auth
                 likes_password=app_password,  # User's app password
-                posts_limit=100,              # Get recent posts for keyword extraction
-                reposts_limit=50,
-                replies_limit=50
+                likes_limit=300,              
+                posts_limit=200,              
+                reposts_limit=100,
+                replies_limit=100
             )
             logger.info(f"Retrieved user data WITH likes for {user_handle}")
         else:
@@ -189,9 +190,9 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
             user_data = client.get_comprehensive_user_data(
                 actor=user_handle,    # Use handle for consistency
                 include_likes=False,  # Skip likes when no app password
-                posts_limit=100,
-                reposts_limit=50,
-                replies_limit=50
+                posts_limit=200,
+                reposts_limit=100,
+                replies_limit=100
             )
             logger.info(f"Retrieved user data WITHOUT likes for {user_handle}")
         
@@ -202,7 +203,7 @@ def collect_and_process_user_data(client: BlueskyUserDataClient, user_did: str, 
             return None
         
         # Extract keywords and generate single user embedding from user content
-        keywords = extract_user_keywords(user_data, top_k=50, min_freq=1)
+        keywords = extract_user_keywords(user_data, top_k=100, min_freq=1)
         
         # Generate single embedding by combining all user posts
         all_posts = embed_posts(user_data)

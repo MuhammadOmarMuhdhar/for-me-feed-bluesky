@@ -56,7 +56,7 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         text = post.get('text', '')
         if text:
             documents.append(text)
-            engagement_weights.append(2.0)
+            engagement_weights.append(1.0)
             all_handle_components.update(extract_handle_components(text))
     
     # Reposts - what they amplify (weight: 3) 
@@ -64,7 +64,7 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         text = repost.get('text', '')
         if text:
             documents.append(text)
-            engagement_weights.append(3.0)
+            engagement_weights.append(1.0)
             all_handle_components.update(extract_handle_components(text))
     
     # Replies - what they engage with (weight: 1.5)
@@ -72,7 +72,7 @@ def extract_user_keywords(user_data: Dict, top_k: int = 10, min_freq: int = 2) -
         text = reply.get('text', '')
         if text:
             documents.append(text)
-            engagement_weights.append(1.5)
+            engagement_weights.append(1.0)
             all_handle_components.update(extract_handle_components(text))
     
     # Likes - what they consume (weight: 1)
