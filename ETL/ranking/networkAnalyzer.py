@@ -10,6 +10,10 @@ from ETL.ranking.config import (
     NETWORK_BOOST_FACTOR, Z_SCORE_THRESHOLD, PROFILE_BATCH_SIZE,
     MIN_FOLLOWING_USERS, FOLLOWING_PERCENTAGE_FALLBACK
 )
+from ETL.ranking.cacheManager import (
+    cache_following_list, get_cached_following_list,
+    cache_2nd_degree_network, get_cached_2nd_degree_network
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +30,10 @@ def get_or_update_following_list(user_did: str, redis_client) -> List[Dict]:
         List of users they follow
     """
     try:
-        # Try to get from cache first
-        cached_following = redis_client.get_cached_following_list(user_did)
+        # Try to get from cache first using centralized cache manager
+        cached_following = get_cached_following_list(redis_client, user_did)
         
-        if cached_following is not None:
+        if cached_following:
             logger.info(f"Using cached following list for {user_did}: {len(cached_following)} accounts")
             return cached_following
         
@@ -42,14 +46,42 @@ def get_or_update_following_list(user_did: str, redis_client) -> List[Dict]:
         following_list = user_client.get_all_user_follows(user_did)
         
         if following_list:
-            # Cache the results
-            redis_client.cache_user_following_list(user_did, following_list)
+            # Cache the results using centralized cache manager
+            cache_following_list(redis_client, user_did, following_list)
             logger.info(f"Cached fresh following list for {user_did}: {len(following_list)} accounts")
         
         return following_list or []
         
     except Exception as e:
         logger.error(f"Failed to get following list for {user_did}: {e}")
+        return []
+
+
+def fetch_following_list_temporary(user_did: str) -> List[Dict]:
+    """
+    Fetch user's following list temporarily without caching (for 2nd degree analysis)
+    
+    Args:
+        user_did: User's DID
+        
+    Returns:
+        List of users they follow (not cached)
+    """
+    try:
+        logger.debug(f"Fetching temporary following list for {user_did}")
+        from client.bluesky.userData import Client as UserDataClient
+        user_client = UserDataClient()
+        user_client.login()
+        
+        following_list = user_client.get_all_user_follows(user_did)
+        
+        if following_list:
+            logger.debug(f"Fetched {len(following_list)} accounts for {user_did} (temporary, not cached)")
+        
+        return following_list or []
+        
+    except Exception as e:
+        logger.warning(f"Failed to fetch temporary following list for {user_did}: {e}")
         return []
 
 
@@ -69,9 +101,9 @@ def calculate_2nd_degree_overlap(user_did: str, redis_client, min_overlap: int =
         min_overlap = MIN_2ND_DEGREE_OVERLAP
         
     try:
-        # Check cache first
-        cached_analysis = redis_client.get_cached_overlap_analysis(user_did)
-        if cached_analysis is not None:
+        # Check cache first using centralized cache manager
+        cached_analysis = get_cached_2nd_degree_network(redis_client, user_did)
+        if cached_analysis:
             logger.info(f"Using cached 2nd degree analysis for {user_did}: {len(cached_analysis)} candidates")
             return cached_analysis
         
@@ -98,8 +130,8 @@ def calculate_2nd_degree_overlap(user_did: str, redis_client, min_overlap: int =
                 continue
                 
             try:
-                # Get who this 1st degree connection follows (their 2nd degree candidates)
-                their_following = get_or_update_following_list(followed_did, redis_client)
+                # Get who this 1st degree connection follows (their 2nd degree candidates) - temporary fetch without caching
+                their_following = fetch_following_list_temporary(followed_did)
                 
                 # Count overlaps
                 for candidate in their_following:
@@ -139,9 +171,9 @@ def calculate_2nd_degree_overlap(user_did: str, redis_client, min_overlap: int =
                 data['priority_score'] = priority_score
                 qualified_candidates[candidate_did] = data
         
-        # Cache the results for 1 week
+        # Cache the results using centralized cache manager with relevance filtering
         if qualified_candidates:
-            redis_client.cache_network_overlap_analysis(user_did, qualified_candidates)
+            cache_2nd_degree_network(redis_client, user_did, qualified_candidates)
         
         logger.info(f"2nd degree analysis complete for {user_did}: {len(qualified_candidates)} qualified candidates from {len(overlap_candidates)} total")
         logger.info(f"Overlap distribution: {sum(1 for c in qualified_candidates.values() if c['overlap_count'] == 2)} 2-overlap, {sum(1 for c in qualified_candidates.values() if c['overlap_count'] >= 3)} 3+-overlap")

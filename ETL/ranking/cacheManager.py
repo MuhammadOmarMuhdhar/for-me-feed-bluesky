@@ -6,7 +6,8 @@ from typing import Dict, List
 
 from ETL.ranking.config import (
     CACHE_TTL_SECONDS, DEFAULT_FEED_TTL_SECONDS, MAX_CACHED_POSTS,
-    DEFAULT_FEED_QUERIES, DEFAULT_FEED_TARGET_COUNT, DEFAULT_TIME_HOURS
+    DEFAULT_FEED_QUERIES, DEFAULT_FEED_TARGET_COUNT, DEFAULT_TIME_HOURS,
+    MAX_2ND_DEGREE_CACHE_CANDIDATES, FOLLOWING_LIST_CACHE_TTL, NETWORK_OVERLAP_CACHE_TTL
 )
 
 logger = logging.getLogger(__name__)
@@ -143,3 +144,177 @@ def update_default_feed_if_needed(redis_client):
     except Exception as e:
         logger.error(f"Error updating default feed: {e}")
         raise
+
+
+def cache_following_list(redis_client, user_id: str, following_list: List[Dict]) -> bool:
+    """
+    Cache user's 1st degree following list
+    
+    Args:
+        redis_client: Redis client instance
+        user_id: User identifier
+        following_list: List of users they follow
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        success = redis_client.cache_user_following_list(
+            user_id, following_list, ttl=FOLLOWING_LIST_CACHE_TTL
+        )
+        
+        if success:
+            logger.info(f"Cached {len(following_list)} following accounts for user {user_id}")
+        else:
+            logger.error(f"Failed to cache following list for user {user_id}")
+            
+        return success
+        
+    except Exception as e:
+        logger.error(f"Error caching following list for user {user_id}: {e}")
+        return False
+
+
+def get_cached_following_list(redis_client, user_id: str) -> List[Dict]:
+    """
+    Retrieve cached 1st degree following list
+    
+    Args:
+        redis_client: Redis client instance
+        user_id: User identifier
+        
+    Returns:
+        List of following users or empty list if not found/expired
+    """
+    try:
+        following_list = redis_client.get_cached_following_list(user_id)
+        
+        if following_list is not None:
+            logger.info(f"Retrieved {len(following_list)} cached following accounts for user {user_id}")
+            return following_list
+        else:
+            logger.debug(f"No cached following list found for user {user_id}")
+            return []
+        
+    except Exception as e:
+        logger.error(f"Error retrieving cached following list for user {user_id}: {e}")
+        return []
+
+
+def _calculate_candidate_relevance_score(candidate_data: Dict) -> float:
+    """
+    Calculate relevance score for 2nd degree network candidates
+    
+    Args:
+        candidate_data: Candidate data with overlap info
+        
+    Returns:
+        Relevance score (higher = more relevant)
+    """
+    try:
+        overlap_count = candidate_data.get('overlap_count', 0)
+        account = candidate_data.get('account', {})
+        
+        # Base score from overlap count (primary factor)
+        relevance_score = overlap_count * 10
+        
+        # Bonus for high overlap (3+ connections = very relevant)
+        if overlap_count >= 3:
+            relevance_score += 15
+        elif overlap_count >= 2:
+            relevance_score += 5
+        
+        # Factor in follower/following ratios if available
+        followers_count = account.get('followersCount', 0)
+        following_count = account.get('followsCount', 1)
+        
+        if followers_count > 0 and following_count > 0:
+            # Prefer accounts with good follower ratios (not spam accounts)
+            ratio = min(10, followers_count / following_count)  # Cap at 10x
+            relevance_score += ratio * 2
+            
+            # Bonus for accounts with reasonable follower counts
+            if 50 <= followers_count <= 10000:
+                relevance_score += 10
+            elif 10 <= followers_count <= 50000:
+                relevance_score += 5
+        
+        return relevance_score
+        
+    except Exception as e:
+        logger.debug(f"Error calculating relevance score: {e}")
+        return overlap_count * 10  # Fallback to basic overlap score
+
+
+def cache_2nd_degree_network(redis_client, user_id: str, overlap_candidates: Dict) -> bool:
+    """
+    Cache 2nd degree network analysis with relevance filtering
+    
+    Args:
+        redis_client: Redis client instance
+        user_id: User identifier
+        overlap_candidates: Dictionary with all overlap candidates
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        if not overlap_candidates:
+            logger.debug(f"No 2nd degree candidates to cache for user {user_id}")
+            return True
+        
+        # Calculate relevance scores for all candidates
+        scored_candidates = []
+        for candidate_did, candidate_data in overlap_candidates.items():
+            relevance_score = _calculate_candidate_relevance_score(candidate_data)
+            candidate_data['relevance_score'] = relevance_score
+            scored_candidates.append((candidate_did, candidate_data))
+        
+        # Sort by relevance score (highest first)
+        scored_candidates.sort(key=lambda x: x[1]['relevance_score'], reverse=True)
+        
+        # Keep only the most relevant candidates
+        relevant_candidates = dict(scored_candidates[:MAX_2ND_DEGREE_CACHE_CANDIDATES])
+        
+        # Cache the filtered candidates
+        success = redis_client.cache_network_overlap_analysis(
+            user_id, relevant_candidates, ttl=NETWORK_OVERLAP_CACHE_TTL
+        )
+        
+        if success:
+            logger.info(f"Cached {len(relevant_candidates)} most relevant 2nd degree candidates for user {user_id} "
+                       f"(filtered from {len(overlap_candidates)} total)")
+        else:
+            logger.error(f"Failed to cache 2nd degree network for user {user_id}")
+            
+        return success
+        
+    except Exception as e:
+        logger.error(f"Error caching 2nd degree network for user {user_id}: {e}")
+        return False
+
+
+def get_cached_2nd_degree_network(redis_client, user_id: str) -> Dict:
+    """
+    Retrieve cached 2nd degree network analysis
+    
+    Args:
+        redis_client: Redis client instance
+        user_id: User identifier
+        
+    Returns:
+        Dictionary with relevant 2nd degree candidates or empty dict if not found
+    """
+    try:
+        overlap_candidates = redis_client.get_cached_overlap_analysis(user_id)
+        
+        if overlap_candidates is not None:
+            logger.info(f"Retrieved {len(overlap_candidates)} cached 2nd degree candidates for user {user_id}")
+            return overlap_candidates
+        else:
+            logger.debug(f"No cached 2nd degree analysis found for user {user_id}")
+            return {}
+        
+    except Exception as e:
+        logger.error(f"Error retrieving cached 2nd degree network for user {user_id}: {e}")
+        return {}
