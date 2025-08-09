@@ -13,8 +13,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.bluesky.newPosts import Client as BlueskyClient
 from client.bigQuery import Client as BigQueryClient
 from client.redis import Client as RedisClient
-from ranking.bm25Similarity import compute_bm25_similarity
+from ranking.bm25Similarity import compute_bm25_similarity, compute_enhanced_bm25_similarity
 from ranking.cosineSimilarity import compute_user_feed_similarity
+from experiments.abTesting import get_ab_test_manager
 from datetime import datetime, timezone
 from dateutil import parser
 
@@ -195,11 +196,11 @@ def calculate_engagement_score(post: Dict) -> float:
 
 def filter_low_engagement_posts(posts: List[Dict], source: str, min_engagement: float = 8.0) -> List[Dict]:
     """
-    Filter posts based on engagement threshold for feeds and search posts
+    Filter posts based on engagement threshold for feeds
     
     Args:
         posts: List of posts to filter
-        source: Source type ('feed', 'network', 'keyword')
+        source: Source type ('feed', 'network')
         min_engagement: Minimum engagement score required
         
     Returns:
@@ -299,8 +300,133 @@ def get_user_embeddings(user_id: str, bq_client: BigQueryClient) -> Optional[np.
         return None
 
 
+def get_user_reading_level(user_id: str, bq_client: BigQueryClient) -> int:
+    """
+    Retrieve user's reading level from BigQuery users table
+    
+    Args:
+        user_id: User's DID
+        bq_client: BigQuery client instance
+        
+    Returns:
+        User's reading level (1-20 scale), defaults to 8 if not found
+    """
+    try:
+        query = f"""
+        SELECT reading_level
+        FROM `{bq_client.project_id}.data.users`
+        WHERE user_id = '{user_id}'
+        AND reading_level IS NOT NULL
+        LIMIT 1
+        """
+        
+        result = bq_client.query(query)
+        
+        if result.empty:
+            logger.debug(f"No reading level found for user {user_id}, using default")
+            return 8  # Default reading level
+        
+        reading_level = result.iloc[0]['reading_level']
+        
+        # Ensure reasonable bounds
+        reading_level = max(1, min(20, int(reading_level)))
+        
+        logger.debug(f"Retrieved reading level {reading_level} for user {user_id}")
+        return reading_level
+        
+    except Exception as e:
+        logger.error(f"Failed to retrieve reading level for user {user_id}: {e}")
+        return 8  # Default reading level
+
+
+def detect_keywords_format(user_keywords) -> str:
+    """
+    Detect the format of user keywords data
+    
+    Returns:
+        'enhanced', 'basic', or 'invalid'
+    """
+    try:
+        import json
+        
+        if user_keywords is None:
+            return 'invalid'
+        
+        # Parse JSON string if needed
+        if isinstance(user_keywords, str):
+            try:
+                keywords_data = json.loads(user_keywords)
+            except json.JSONDecodeError:
+                return 'invalid'
+        else:
+            keywords_data = user_keywords
+        
+        # Check for enhanced format (dict with sentiment/emotions)
+        if isinstance(keywords_data, dict):
+            # Look for enhanced keyword structure
+            for keyword, data in keywords_data.items():
+                if isinstance(data, dict) and 'sentiment' in data and 'emotions' in data:
+                    return 'enhanced'
+            return 'basic'  # Dict but not enhanced format
+        
+        # Check for basic format (list of strings)
+        elif isinstance(keywords_data, list):
+            return 'basic'
+        
+        return 'invalid'
+        
+    except Exception as e:
+        logger.error(f"Error detecting keywords format: {e}")
+        return 'invalid'
+
+
+def get_enhanced_user_terms(enhanced_keywords) -> tuple:
+    """
+    Convert enhanced keywords to weighted terms + sentiment context
+    
+    Returns:
+        (weighted_terms_list, sentiment_context_dict)
+    """
+    try:
+        import json
+        
+        # Parse JSON string if needed
+        if isinstance(enhanced_keywords, str):
+            keywords_data = json.loads(enhanced_keywords)
+        else:
+            keywords_data = enhanced_keywords
+        
+        if not isinstance(keywords_data, dict):
+            logger.warning("Enhanced keywords should be a dictionary")
+            return [], {}
+        
+        terms = []
+        sentiment_context = {}
+        
+        for keyword, data in keywords_data.items():
+            if not isinstance(data, dict):
+                continue
+                
+            # Extract frequency for weighting
+            frequency = data.get('frequency', 1)
+            weight = min(5, max(1, frequency))  # Clamp weight between 1-5
+            
+            # Add terms weighted by frequency
+            terms.extend([keyword] * weight)
+            
+            # Store sentiment context
+            sentiment_context[keyword] = data
+        
+        logger.info(f"Converted {len(sentiment_context)} enhanced keywords to {len(terms)} weighted terms")
+        return terms, sentiment_context
+        
+    except Exception as e:
+        logger.error(f"Failed to process enhanced keywords: {e}")
+        return [], {}
+
+
 def get_user_keywords_as_terms(user_keywords) -> List[str]:
-    """Convert stored keywords to term list for BM25"""
+    """Convert stored keywords to term list for BM25 (legacy function for backward compatibility)"""
     try:
         import json
         terms = []
@@ -334,6 +460,241 @@ def get_user_keywords_as_terms(user_keywords) -> List[str]:
         
     except Exception as e:
         logger.error(f"Failed to process user keywords: {e}")
+        return []
+
+
+def process_user_keywords(user_keywords):
+    """
+    Process user keywords detecting format and returning appropriate data
+    
+    Returns:
+        For enhanced format: (terms_list, sentiment_context_dict, 'enhanced')
+        For basic format: (terms_list, None, 'basic')  
+        For invalid: ([], None, 'invalid')
+    """
+    keywords_format = detect_keywords_format(user_keywords)
+    
+    if keywords_format == 'enhanced':
+        terms, sentiment_context = get_enhanced_user_terms(user_keywords)
+        return terms, sentiment_context, 'enhanced'
+    elif keywords_format == 'basic':
+        terms = get_user_keywords_as_terms(user_keywords)
+        return terms, None, 'basic'
+    else:
+        logger.warning("Invalid keywords format detected")
+        return [], None, 'invalid'
+
+
+def get_or_update_following_list(user_did: str, redis_client: RedisClient) -> List[Dict]:
+    """
+    Get user's following list from cache or fetch fresh if expired
+    
+    Args:
+        user_did: User's DID
+        redis_client: Redis client for caching
+        
+    Returns:
+        List of users they follow
+    """
+    try:
+        # Try to get from cache first
+        cached_following = redis_client.get_cached_following_list(user_did)
+        
+        if cached_following is not None:
+            logger.info(f"Using cached following list for {user_did}: {len(cached_following)} accounts")
+            return cached_following
+        
+        # Cache miss - fetch fresh data
+        logger.info(f"Fetching fresh following list for {user_did}")
+        from client.bluesky.userData import Client as UserDataClient
+        user_client = UserDataClient()
+        user_client.login()
+        
+        following_list = user_client.get_all_user_follows(user_did)
+        
+        if following_list:
+            # Cache the results
+            redis_client.cache_user_following_list(user_did, following_list)
+            logger.info(f"Cached fresh following list for {user_did}: {len(following_list)} accounts")
+        
+        return following_list or []
+        
+    except Exception as e:
+        logger.error(f"Failed to get following list for {user_did}: {e}")
+        return []
+
+
+def calculate_2nd_degree_overlap(user_did: str, redis_client: RedisClient, min_overlap: int = 2) -> Dict:
+    """
+    Calculate 2nd degree network overlap by analyzing who each 1st degree connection follows
+    
+    Args:
+        user_did: User's DID
+        redis_client: Redis client for caching
+        min_overlap: Minimum overlap count to qualify as 2nd degree candidate
+        
+    Returns:
+        Dictionary of qualified 2nd degree candidates with overlap scores
+    """
+    try:
+        # Check cache first
+        cached_analysis = redis_client.get_cached_overlap_analysis(user_did)
+        if cached_analysis is not None:
+            logger.info(f"Using cached 2nd degree analysis for {user_did}: {len(cached_analysis)} candidates")
+            return cached_analysis
+        
+        # Cache miss - perform fresh analysis
+        logger.info(f"Calculating fresh 2nd degree overlap analysis for {user_did}")
+        
+        # Get user's 1st degree network (cached)
+        first_degree = get_or_update_following_list(user_did, redis_client)
+        
+        if not first_degree:
+            logger.warning(f"No 1st degree network found for {user_did}")
+            return {}
+        
+        # Track overlap candidates
+        overlap_candidates = {}
+        processed_count = 0
+        
+        # For each 1st degree connection, get who they follow
+        for followed_user in first_degree:
+            followed_did = followed_user.get('did')
+            followed_handle = followed_user.get('handle', 'unknown')
+            
+            if not followed_did:
+                continue
+                
+            try:
+                # Get who this 1st degree connection follows (their 2nd degree candidates)
+                their_following = get_or_update_following_list(followed_did, redis_client)
+                
+                # Count overlaps
+                for candidate in their_following:
+                    candidate_did = candidate.get('did')
+                    candidate_handle = candidate.get('handle', 'unknown')
+                    
+                    if not candidate_did or candidate_did == user_did:  # Skip self
+                        continue
+                    
+                    # Initialize or update overlap tracking
+                    if candidate_did not in overlap_candidates:
+                        overlap_candidates[candidate_did] = {
+                            'account': candidate,
+                            'overlap_count': 0,
+                            'followed_by': []
+                        }
+                    
+                    overlap_candidates[candidate_did]['overlap_count'] += 1
+                    overlap_candidates[candidate_did]['followed_by'].append(followed_handle)
+                
+                processed_count += 1
+                logger.info(f"Processed {processed_count}/{len(first_degree)}: {followed_handle} follows {len(their_following)} accounts")
+                
+            except Exception as e:
+                logger.warning(f"Failed to get following list for {followed_handle}: {e}")
+                continue
+        
+        # Filter candidates by minimum overlap threshold
+        qualified_candidates = {}
+        for candidate_did, data in overlap_candidates.items():
+            if data['overlap_count'] >= min_overlap:
+                # Calculate priority score based on overlap count
+                priority_score = data['overlap_count']
+                if data['overlap_count'] >= 3:
+                    priority_score *= 1.5  # Bonus for high overlap
+                
+                data['priority_score'] = priority_score
+                qualified_candidates[candidate_did] = data
+        
+        # Cache the results for 1 week
+        if qualified_candidates:
+            redis_client.cache_network_overlap_analysis(user_did, qualified_candidates)
+        
+        logger.info(f"2nd degree analysis complete for {user_did}: {len(qualified_candidates)} qualified candidates from {len(overlap_candidates)} total")
+        logger.info(f"Overlap distribution: {sum(1 for c in qualified_candidates.values() if c['overlap_count'] == 2)} 2-overlap, {sum(1 for c in qualified_candidates.values() if c['overlap_count'] >= 3)} 3+-overlap")
+        
+        return qualified_candidates
+        
+    except Exception as e:
+        logger.error(f"Failed to calculate 2nd degree overlap for {user_did}: {e}")
+        return {}
+
+
+def collect_2nd_degree_posts(user_did: str, redis_client: RedisClient, posts_limit: int = 20) -> List[Dict]:
+    """
+    Collect posts from 2nd degree network (overlap-based discovery)
+    
+    Args:
+        user_did: User's DID
+        redis_client: Redis client for caching
+        posts_limit: Number of posts to collect per 2nd degree account
+        
+    Returns:
+        List of posts from 2nd degree network with overlap metadata
+    """
+    try:
+        # Get 2nd degree overlap analysis
+        overlap_candidates = calculate_2nd_degree_overlap(user_did, redis_client)
+        
+        if not overlap_candidates:
+            logger.info(f"No 2nd degree candidates found for {user_did}")
+            return []
+        
+        # Sort candidates by priority score and limit to top 50
+        sorted_candidates = sorted(
+            overlap_candidates.values(), 
+            key=lambda x: x['priority_score'], 
+            reverse=True
+        )[:50]
+        
+        logger.info(f"Collecting posts from top {len(sorted_candidates)} 2nd degree candidates")
+        
+        # Initialize posts client
+        from client.bluesky.userData import Client as UserDataClient
+        user_client = UserDataClient()
+        user_client.login()
+        
+        all_2nd_degree_posts = []
+        successful_collections = 0
+        
+        # Collect posts from each qualified 2nd degree account
+        for candidate_data in sorted_candidates:
+            account = candidate_data['account']
+            candidate_did = account.get('did')
+            candidate_handle = account.get('handle', 'unknown')
+            overlap_count = candidate_data['overlap_count']
+            
+            try:
+                # Get recent posts from this 2nd degree account
+                posts = user_client.get_user_posts(
+                    actor=candidate_did,
+                    limit=posts_limit
+                )
+                
+                # Tag posts with 2nd degree metadata
+                for post in posts:
+                    post['source'] = '2nd_degree'
+                    post['overlap_count'] = overlap_count
+                    post['followed_by'] = candidate_data['followed_by']
+                    post['priority_weight'] = min(1.0, overlap_count / 3.0)  # Scale 0.67-1.0
+                    post['2nd_degree_account'] = candidate_handle
+                
+                all_2nd_degree_posts.extend(posts)
+                successful_collections += 1
+                
+                logger.debug(f"Collected {len(posts)} posts from 2nd degree {candidate_handle} (overlap: {overlap_count})")
+                
+            except Exception as e:
+                logger.warning(f"Failed to collect posts from 2nd degree {candidate_handle}: {e}")
+                continue
+        
+        logger.info(f"2nd degree collection complete: {len(all_2nd_degree_posts)} posts from {successful_collections}/{len(sorted_candidates)} accounts")
+        
+        return all_2nd_degree_posts
+        
+    except Exception as e:
+        logger.error(f"Failed to collect 2nd degree posts for {user_did}: {e}")
         return []
 
 
@@ -489,16 +850,18 @@ def collect_comprehensive_posts(
     user_embeddings: Optional[np.ndarray],
     user_keywords: List[str], 
     user_did: str,
-    bq_client: BigQueryClient
+    bq_client: BigQueryClient,
+    redis_client: RedisClient
 ) -> List[Dict]:
     """
-    Collect posts from three sources: matching feeds, following network, and keyword/trending
+    Collect posts from three sources: matching feeds, 1st degree network, and 2nd degree network
     
     Args:
         user_embeddings: User's embedding vector for feed matching
-        user_keywords: User's keywords for search-based collection
+        user_keywords: User's keywords for BM25 ranking (not collection)
         user_did: User's DID for network posts
         bq_client: BigQuery client for feed matching
+        redis_client: Redis client for network caching
         
     Returns:
         List of posts from all sources with source tagging
@@ -524,7 +887,6 @@ def collect_comprehensive_posts(
                     try:
                         posts = posts_client.extract_posts_from_feed(
                             feed_url_or_uri=feed_match['feed_uri'],
-                            limit=100,
                             time_hours=6
                         )
                         
@@ -555,75 +917,52 @@ def collect_comprehensive_posts(
         else:
             logger.info("No user embeddings available, skipping feed-based collection")
         
-        # 2. Get posts from following network
+        # 2. Get posts from 1st degree network (following)
         try:
-            logger.info("Collecting posts from following network...")
-            from client.bluesky.userData import Client as UserDataClient
-            user_client = UserDataClient()
-            user_client.login()
+            logger.info("Collecting posts from 1st degree network...")
             
-            # Get following list
-            following_data = user_client.get_all_user_follows(user_did)
-            following_list = following_data if following_data else []
-            
-            # Apply dynamic ratio-based filtering
-            if following_list:
-                following_list = prioritize_follows_by_ratio(following_list, user_client)
+            # Get following list (cached) - using all accounts, no z-score filtering
+            following_list = get_or_update_following_list(user_did, redis_client)
             
             if following_list:
                 network_posts = posts_client.get_following_timeline(
                     following_list=following_list,
-                    target_count=200,
                     time_hours=6,
                     include_reposts=True,
                     repost_weight=0.5
                 )
                 
-                # Filter and tag network posts  
+                # Filter and tag 1st degree network posts  
                 network_posts = filter_low_engagement_posts(network_posts, source='network')
                 for post in network_posts:
                     post['source'] = 'network'
                     post['from_network'] = True
+                    post['network_degree'] = 1
                 
                 all_posts.extend(network_posts)
-                logger.info(f"Collected {len(network_posts)} network posts")
+                logger.info(f"Collected {len(network_posts)} 1st degree network posts")
             else:
-                logger.warning("No following list found for network posts")
+                logger.warning("No following list found for 1st degree network posts")
                 
         except Exception as e:
-            logger.error(f"Failed to collect network posts: {e}")
+            logger.error(f"Failed to collect 1st degree network posts: {e}")
         
-        # 3. Get keyword/trending posts for discovery
+        # 3. Get posts from 2nd degree network (overlap-based discovery)
         try:
-            logger.info("Collecting keyword/trending posts...")
+            logger.info("Collecting posts from 2nd degree network...")
             
-            # Use user keywords if available
-            if user_keywords:
-                keyword_posts = posts_client.get_posts_with_user_keywords(
-                    user_keywords=user_keywords,  
-                    target_count=1000,
-                    generic_ratio=0.01,  # 1% generic trending posts
-                    time_hours=6
-                )
-            else:
-                # Fallback to trending posts
-                keyword_posts = posts_client.get_top_posts_multiple_queries(
-                    queries=["the", "a", "I", "you", "this", "today", "new", "just"],
-                    target_count=100,
-                    time_hours=6
-                )
+            second_degree_posts = collect_2nd_degree_posts(user_did, redis_client, posts_limit=15)
             
-            # Filter and tag keyword posts
-            keyword_posts = filter_low_engagement_posts(keyword_posts, source='keyword', min_engagement=15.0)
-            for post in keyword_posts:
-                post['source'] = 'keyword'
-                post['from_trending'] = True
+            # Tag 2nd degree posts
+            for post in second_degree_posts:
+                post['network_degree'] = 2
             
-            all_posts.extend(keyword_posts)
-            logger.info(f"Collected {len(keyword_posts)} keyword/trending posts")
-            
+            all_posts.extend(second_degree_posts)
+            logger.info(f"Collected {len(second_degree_posts)} 2nd degree network posts")
+                
         except Exception as e:
-            logger.error(f"Failed to collect keyword posts: {e}")
+            logger.error(f"Failed to collect 2nd degree network posts: {e}")
+        
         
         # Log collection summary
         source_counts = {}
@@ -631,7 +970,7 @@ def collect_comprehensive_posts(
             source = post.get('source', 'unknown')
             source_counts[source] = source_counts.get(source, 0) + 1
         
-        logger.info(f"Comprehensive collection complete: {len(all_posts)} total posts")
+        logger.info(f"Network-focused collection complete: {len(all_posts)} total posts")
         logger.info(f"Source breakdown: {source_counts}")
         
         return all_posts
@@ -641,13 +980,13 @@ def collect_comprehensive_posts(
         return []
 
 
-def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> List[Dict]:
-    """Collect posts to rank using hybrid system with following network"""
+def collect_posts_to_rank(user_did: str = None) -> List[Dict]:
+    """Collect posts to rank using network-only system"""
     try:
         posts_client = BlueskyClient()
         posts_client.login()
         
-        # Get user's following list for network effects
+        # Get user's following list for network posts
         following_list = []
         if user_did:
             try:
@@ -659,16 +998,8 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 following_list = following_data if following_data else []  # Keep full objects
                 logger.info(f"Retrieved {len(following_list)} following accounts for user {user_did}")
                 
-                # Apply dynamic ratio-based filtering
-                if following_list:
-                    following_list = prioritize_follows_by_ratio(following_list, user_client)
-                
-                # Debug: Log first few following accounts
-                if following_list:
-                    sample_dids = [f.get('did', 'unknown') for f in following_list[:3]]
-                    logger.info(f"Sample following DIDs after filtering: {sample_dids}...")
-                else:
-                    logger.warning(f"No following accounts found for user {user_did}")
+                # Remove z-score filtering - use all following accounts
+                logger.info(f"Using all {len(following_list)} following accounts (no filtering)")
                     
             except Exception as e:
                 logger.error(f"Failed to get following list for {user_did}: {e}")
@@ -676,66 +1007,26 @@ def collect_posts_to_rank(user_keywords: List[str], user_did: str = None) -> Lis
                 logger.error(f"Following list error traceback: {traceback.format_exc()}")
                 following_list = []
         
-        # Create mock user_data structure for compatibility
-        mock_user_data = {
-            'posts': [{'text': ' '.join(user_keywords[:10])}],  # Use keywords as mock content
-            'reposts': [],
-            'replies': [],
-            'likes': []
-        }
+        if not following_list:
+            logger.warning("No following list available for network-based collection")
+            return []
         
-        new_posts = posts_client.get_posts_hybrid(
-            user_data=mock_user_data,
-            following_list=following_list,  
-            target_count=10000, 
-            time_hours=3,  
-            following_ratio=0.6,  
-            keyword_ratio=0.4,
-            keyword_extraction_method="advanced",
+        # Get network posts only
+        network_posts = posts_client.get_following_timeline(
+            following_list=following_list,
+            time_hours=6,
             include_reposts=True,
             repost_weight=0.5
         )
         
-        # Debug: Check what we got back
-        logger.info(f"get_posts_hybrid returned {len(new_posts) if new_posts else 0} items")
-        if new_posts:
-            logger.info(f"First post type: {type(new_posts[0])}")
-            if len(new_posts) > 0 and isinstance(new_posts[0], dict):
-                logger.info(f"First post keys: {list(new_posts[0].keys())}")
-            elif len(new_posts) > 0:
-                logger.info(f"First post content: {new_posts[0][:100] if isinstance(new_posts[0], str) else new_posts[0]}")
+        # Tag all posts as network posts
+        for post in network_posts:
+            post['source'] = 'network'
+            post['from_network'] = True
         
-        # Debug: Analyze post sources
-        if new_posts:
-            following_posts = 0
-            keyword_posts = 0
-            
-            # Create set of following DIDs for fast lookup
-            following_dids = {f.get('did', '') for f in following_list if isinstance(f, dict)}
-            
-            for i, post in enumerate(new_posts):
-                try:
-                    # Ensure post is a dictionary
-                    if not isinstance(post, dict):
-                        logger.warning(f"Post {i} is not a dictionary: {type(post)} - {post}")
-                        continue
-                        
-                    author_did = post.get('author', {}).get('did', '')
-                    if author_did in following_dids:
-                        following_posts += 1
-                    else:
-                        keyword_posts += 1
-                except Exception as e:
-                    logger.error(f"Error processing post {i}: {e}")
-                    continue
-            
-            logger.info(f"Post source breakdown: {following_posts} from network, {keyword_posts} from keywords")
-            if len(new_posts) > 0:
-                logger.info(f"Network effectiveness: {following_posts/len(new_posts)*100:.1f}% from following")
+        logger.info(f"Collected {len(network_posts)} network posts from {len(following_list)} following accounts")
         
-        logger.info(f"Collected {len(new_posts)} posts to rank")
-        
-        return new_posts
+        return network_posts
         
     except Exception as e:
         import traceback
@@ -867,7 +1158,7 @@ def is_viral_post(post: Dict, age_threshold: float = 45.0, velocity_threshold: f
         True if post should receive viral boost
     """
     try:
-        # Only check feed and network posts (not keyword posts)
+        # Only check feed and network posts
         source = post.get('source', '')
         if source not in ['feed', 'network']:
             return False
@@ -889,8 +1180,8 @@ def is_viral_post(post: Dict, age_threshold: float = 45.0, velocity_threshold: f
         return False
 
 
-def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dict]) -> List[Dict]:
-    """Calculate BM25 rankings with feed similarity boosting and combined scoring"""
+def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dict], user_sentiment_context: Dict = None, user_reading_level: int = 8) -> List[Dict]:
+    """Calculate enhanced BM25 rankings with sentiment analysis, feed similarity boosting and combined scoring"""
     try:
         if not user_terms:
             logger.warning("No user terms provided for ranking")
@@ -903,8 +1194,21 @@ def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dic
         if len(filtered_posts) < len(posts):
             logger.info(f"Moderation filtering: {len(posts)} -> {len(filtered_posts)} posts")
         
-        # Calculate BM25 similarity using stored keywords on filtered posts
-        ranked_posts = compute_bm25_similarity(user_terms, filtered_posts)
+        # Use enhanced BM25 if sentiment context is available, otherwise fall back to basic BM25
+        if user_sentiment_context:
+            logger.info("Using enhanced BM25 with sentiment analysis")
+            ranked_posts = compute_enhanced_bm25_similarity(
+                user_terms, 
+                filtered_posts, 
+                user_sentiment_context=user_sentiment_context,
+                user_reading_level=user_reading_level
+            )
+            # Enhanced BM25 sets enhanced_bm25_score, use that as the base
+            for post in ranked_posts:
+                post['bm25_score'] = post.get('enhanced_bm25_score', 0.0)
+        else:
+            logger.info("Using basic BM25 without sentiment analysis")
+            ranked_posts = compute_bm25_similarity(user_terms, filtered_posts)
         
         # Apply priority-based boosting: network > feed > search
         for post in ranked_posts:
@@ -913,23 +1217,34 @@ def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dic
             
             # Priority-based boosting system
             if source == 'network':
-                # Network posts: Highest priority boost (3.0x base + small BM25 bonus)
-                priority_boost = 3.0 + (bm25_score * 0.1)
+                network_degree = post.get('network_degree', 1)
+                if network_degree == 1:
+                    # 1st degree network: Highest priority boost
+                    priority_boost = 3.0 + (bm25_score * 0.1)
+                    post['boost_reason'] = '1st_degree_network'
+                else:
+                    # Should not happen since network posts are tagged as 1st degree
+                    priority_boost = 3.0 + (bm25_score * 0.1)
+                    post['boost_reason'] = 'network_priority'
                 post['priority_boost'] = priority_boost
-                post['boost_reason'] = 'network_priority'
+            elif source == '2nd_degree':
+                # 2nd degree network: High priority based on overlap count
+                overlap_count = post.get('overlap_count', 1)
+                base_boost = 1.0 + (overlap_count / 3.0)  # 1.0-2.0 range
+                priority_boost = base_boost + (bm25_score * 0.15)
+                post['priority_boost'] = priority_boost
+                post['boost_reason'] = '2nd_degree_network'
             elif source == 'feed':
                 # Feed posts: Medium priority boost (feed similarity + BM25)
                 feed_similarity = post.get('feed_similarity', 0)
-                # Feed boost: 1.5x base + similarity bonus + BM25 bonus
                 priority_boost = 1.5 + (feed_similarity * 1.0) + (bm25_score * 0.2)
                 post['priority_boost'] = priority_boost
                 post['boost_reason'] = 'feed_priority'
             else:
-                # Keyword posts: Apply 70% penalty to counter collection bias
-                keyword_penalty = 0.3  # 30% of original score = 70% penalty
-                priority_boost = bm25_score * keyword_penalty
+                # Unknown source: minimal boost
+                priority_boost = 0.1
                 post['priority_boost'] = priority_boost
-                post['boost_reason'] = 'keyword_penalty'
+                post['boost_reason'] = 'unknown_source'
             
             # Final score = BM25 + Priority Boost
             final_score = bm25_score + priority_boost
@@ -955,31 +1270,31 @@ def calculate_rankings_with_feed_boosting(user_terms: List[str], posts: List[Dic
         # Log scoring statistics
         feed_posts = [p for p in ranked_posts if p.get('source') == 'feed']
         network_posts = [p for p in ranked_posts if p.get('source') == 'network']
-        keyword_posts = [p for p in ranked_posts if p.get('source') == 'keyword']
+        second_degree_posts = [p for p in ranked_posts if p.get('source') == '2nd_degree']
         
-        logger.info(f"Calculated priority-based rankings for {len(ranked_posts)} posts using {len(set(user_terms))} unique keywords")
-        logger.info(f"Source distribution: {len(feed_posts)} feed, {len(network_posts)} network, {len(keyword_posts)} keyword")
+        logger.info(f"Calculated network-focused rankings for {len(ranked_posts)} posts using {len(set(user_terms))} unique terms")
+        logger.info(f"Source distribution: {len(feed_posts)} feed, {len(network_posts)} 1st degree, {len(second_degree_posts)} 2nd degree")
         
         # Log top 10 post sources for verification
         top_10_sources = [p.get('source', 'unknown') for p in ranked_posts[:10]]
-        source_counts_top10 = {src: top_10_sources.count(src) for src in ['network', 'feed', 'keyword']}
+        source_counts_top10 = {src: top_10_sources.count(src) for src in ['network', 'feed', '2nd_degree']}
         logger.info(f"Top 10 posts source breakdown: {source_counts_top10}")
         
         if network_posts:
             avg_network_boost = sum(p.get('priority_boost', 0) for p in network_posts) / len(network_posts)
-            logger.info(f"Average network priority boost: {avg_network_boost:.2f}")
+            logger.info(f"Average 1st degree network boost: {avg_network_boost:.2f}")
+        
+        if second_degree_posts:
+            avg_2nd_degree_boost = sum(p.get('priority_boost', 0) for p in second_degree_posts) / len(second_degree_posts)
+            avg_overlap_count = sum(p.get('overlap_count', 0) for p in second_degree_posts) / len(second_degree_posts)
+            second_degree_in_top_50 = sum(1 for post in ranked_posts[:50] if post.get('source') == '2nd_degree')
+            logger.info(f"Average 2nd degree boost: {avg_2nd_degree_boost:.2f} (avg overlap: {avg_overlap_count:.1f})")
+            logger.info(f"2nd degree posts in top 50: {second_degree_in_top_50} ({second_degree_in_top_50/min(50, len(ranked_posts))*100:.1f}%)")
         
         if feed_posts:
             avg_feed_boost = sum(p.get('priority_boost', 0) for p in feed_posts) / len(feed_posts)
             logger.info(f"Average feed priority boost: {avg_feed_boost:.2f}")
         
-        if keyword_posts:
-            avg_keyword_penalty = sum(p.get('priority_boost', 0) for p in keyword_posts) / len(keyword_posts)
-            avg_keyword_bm25 = sum(p.get('bm25_score', 0) for p in keyword_posts) / len(keyword_posts)
-            keyword_in_top_50 = sum(1 for post in ranked_posts[:50] if post.get('source') == 'keyword')
-            logger.info(f"Average keyword penalty boost: {avg_keyword_penalty:.2f} (70% penalty applied)")
-            logger.info(f"Average keyword BM25 before penalty: {avg_keyword_bm25:.2f}")
-            logger.info(f"Keyword posts in top 50: {keyword_in_top_50} ({keyword_in_top_50/min(50, len(ranked_posts))*100:.1f}%)")
         
         # Log viral boost statistics
         if viral_boosted_count > 0:
@@ -1340,30 +1655,56 @@ def main():
             try:
                 logger.info(f"Processing user: {user_handle}")
                 
-                # Step 1: Get user embeddings and keywords
+                # Step 1: Get user embeddings, keywords, and reading level
                 user_embeddings = get_user_embeddings(user_id, bq_client)
                 user_keywords = user.get('keywords')
-                user_terms = get_user_keywords_as_terms(user_keywords)
+                user_reading_level = get_user_reading_level(user_id, bq_client)
                 
+                # Process keywords using enhanced format detection
+                user_terms, user_sentiment_context, keywords_format = process_user_keywords(user_keywords)
+                
+                # Users can now get feeds based on network alone, even without keywords/embeddings
                 if not user_terms and user_embeddings is None:
-                    logger.warning(f"No keywords or embeddings found for {user_handle}, skipping")
-                    continue
+                    logger.info(f"No keywords or embeddings for {user_handle}, using network-only approach")
                 
-                # Step 2: Comprehensive post collection (feeds + network + keywords)
+                # Log keyword format for monitoring
+                logger.info(f"User {user_handle} using {keywords_format} keywords format with {len(user_terms)} terms")
+                
+                # A/B Testing: Determine if user should get enhanced ranking
+                ab_test_manager = get_ab_test_manager()
+                use_enhanced, experiment_group = ab_test_manager.should_use_enhanced_ranking(user_id)
+                
+                # Override user_sentiment_context based on A/B test group
+                if not use_enhanced:
+                    logger.info(f"User {user_handle} in A/B test group '{experiment_group}' - using basic ranking")
+                    user_sentiment_context = None  # Force basic ranking
+                else:
+                    logger.info(f"User {user_handle} in A/B test group '{experiment_group}' - using enhanced ranking")
+                
+                # Cache experiment group assignment in Redis for consistency
+                redis_client.set_user_experiment_group(user_id, 'enhanced_keywords_experiment', experiment_group)
+                
+                # Step 2: Comprehensive post collection (feeds + 1st/2nd degree network)
                 posts_to_rank = collect_comprehensive_posts(
                     user_embeddings=user_embeddings,
                     user_keywords=user_terms,
                     user_did=user_id,
-                    bq_client=bq_client
+                    bq_client=bq_client,
+                    redis_client=redis_client
                 )
                 
                 if not posts_to_rank:
                     logger.warning(f"No posts collected for {user_handle}, skipping")
                     continue
                 
-                # Step 3: Calculate rankings with feed boosting
+                # Step 3: Calculate rankings with enhanced BM25 and feed boosting
                 if user_terms:
-                    ranked_posts = calculate_rankings_with_feed_boosting(user_terms, posts_to_rank)
+                    ranked_posts = calculate_rankings_with_feed_boosting(
+                        user_terms, 
+                        posts_to_rank,
+                        user_sentiment_context=user_sentiment_context,
+                        user_reading_level=user_reading_level
+                    )
                 else:
                     # Fallback for users with embeddings but no keywords
                     logger.info(f"No keywords for {user_handle}, using basic scoring")
@@ -1392,7 +1733,32 @@ def main():
                     success_count += 1
                     embeddings_status = "with embeddings" if user_embeddings is not None else "no embeddings"
                     keywords_count = len(user_terms) if user_terms else 0
-                    logger.info(f"Successfully processed {user_handle} ({embeddings_status}, {keywords_count} keywords)")
+                    
+                    # Log experiment metrics for A/B testing analysis
+                    experiment_metrics = {
+                        'experiment_group': experiment_group,
+                        'keywords_format': keywords_format,
+                        'user_reading_level': user_reading_level,
+                        'posts_ranked': len(ranked_posts),
+                        'keywords_count': keywords_count,
+                        'has_embeddings': user_embeddings is not None,
+                        'has_sentiment_context': user_sentiment_context is not None,
+                        'ranking_method': 'enhanced' if user_sentiment_context else 'basic'
+                    }
+                    
+                    # Add sentiment analysis stats if available
+                    if user_sentiment_context and ranked_posts:
+                        sentiment_boosted = len([p for p in ranked_posts[:50] if p.get('sentiment_multiplier', 1.0) > 1.05])
+                        sentiment_penalized = len([p for p in ranked_posts[:50] if p.get('sentiment_multiplier', 1.0) < 0.95])
+                        experiment_metrics.update({
+                            'sentiment_boosted_posts': sentiment_boosted,
+                            'sentiment_penalized_posts': sentiment_penalized
+                        })
+                    
+                    ab_test_manager.log_ranking_experiment(user_id, experiment_metrics)
+                    redis_client.log_experiment_metrics(user_id, experiment_metrics)
+                    
+                    logger.info(f"Successfully processed {user_handle} ({embeddings_status}, {keywords_count} keywords, {experiment_group} group)")
                 else:
                     error_count += 1
                     logger.error(f"Failed to cache results for {user_handle}")
@@ -1416,7 +1782,7 @@ def main():
         cached_users = redis_client.get_cached_users()
         logger.info(f"Redis Stats: {stats}")
         logger.info(f"Total cached feeds: {len(cached_users)}")
-        logger.info(f"ETL Performance: Comprehensive collection (feeds + network + keywords) with embedding-based feed filtering")
+        logger.info(f"ETL Performance: Network-focused collection (feeds + network) with embedding-based feed filtering")
         
     except Exception as e:
         logger.error(f"ETL failed with error: {e}")

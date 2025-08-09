@@ -331,6 +331,237 @@ class Client:
             self.logger.error(f"Failed to clear feeds: {e}")
             return False
 
+    def set_user_experiment_group(self, user_id: str, experiment_name: str, group: str, ttl: int = 86400) -> bool:
+        """
+        Store user's experiment group assignment
+        
+        Args:
+            user_id: User identifier
+            experiment_name: Name of the experiment
+            group: Assigned group name
+            ttl: Time to live in seconds (default: 24 hours)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            key = f"experiment:{experiment_name}:{user_id}"
+            self.client.setex(key, ttl, group)
+            self.logger.debug(f"Set experiment group for user {user_id[:12]}...: {experiment_name} -> {group}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to set experiment group for user {user_id}: {e}")
+            return False
+    
+    def get_user_experiment_group(self, user_id: str, experiment_name: str) -> Optional[str]:
+        """
+        Get user's experiment group assignment
+        
+        Args:
+            user_id: User identifier
+            experiment_name: Name of the experiment
+            
+        Returns:
+            Group name if cached, None otherwise
+        """
+        try:
+            key = f"experiment:{experiment_name}:{user_id}"
+            group = self.client.get(key)
+            if group:
+                self.logger.debug(f"Retrieved experiment group for user {user_id[:12]}...: {experiment_name} -> {group}")
+            return group
+        except Exception as e:
+            self.logger.error(f"Failed to get experiment group for user {user_id}: {e}")
+            return None
+    
+    def log_experiment_metrics(self, user_id: str, experiment_data: Dict) -> bool:
+        """
+        Log experiment metrics to Redis for later analysis
+        
+        Args:
+            user_id: User identifier
+            experiment_data: Dictionary with experiment metrics
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            timestamp = int(time.time())
+            key = f"experiment_metrics:{datetime.now().strftime('%Y-%m-%d')}"
+            
+            # Store metrics as JSON with timestamp
+            metrics_entry = {
+                'user_id': user_id,
+                'timestamp': timestamp,
+                **experiment_data
+            }
+            
+            # Add to daily sorted set with timestamp as score
+            self.client.zadd(key, {json.dumps(metrics_entry): timestamp})
+            
+            # Expire daily metrics after 30 days
+            self.client.expire(key, 30 * 24 * 60 * 60)
+            
+            self.logger.debug(f"Logged experiment metrics for user {user_id[:12]}...")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to log experiment metrics for user {user_id}: {e}")
+            return False
+    
+    def get_experiment_metrics(self, date_str: str = None, limit: int = 100) -> List[Dict]:
+        """
+        Get experiment metrics for analysis
+        
+        Args:
+            date_str: Date string in YYYY-MM-DD format (default: today)
+            limit: Maximum number of entries to return
+            
+        Returns:
+            List of experiment metric dictionaries
+        """
+        try:
+            if not date_str:
+                date_str = datetime.now().strftime('%Y-%m-%d')
+            
+            key = f"experiment_metrics:{date_str}"
+            
+            # Get entries from sorted set (most recent first)
+            entries = self.client.zrevrange(key, 0, limit-1)
+            
+            metrics = []
+            for entry in entries:
+                try:
+                    metrics.append(json.loads(entry))
+                except json.JSONDecodeError:
+                    continue
+            
+            self.logger.debug(f"Retrieved {len(metrics)} experiment metrics for {date_str}")
+            return metrics
+        except Exception as e:
+            self.logger.error(f"Failed to get experiment metrics: {e}")
+            return []
+
+    def cache_user_following_list(self, user_id: str, following_list: List[Dict], ttl: int = 86400) -> bool:
+        """
+        Cache user's 1st degree following list
+        
+        Args:
+            user_id: User identifier
+            following_list: List of users they follow
+            ttl: Time to live in seconds (default: 24 hours)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            key = f"network:{user_id}:following"
+            
+            # Store following data with metadata
+            network_data = {
+                'following_list': following_list,
+                'updated_at': datetime.utcnow().isoformat(),
+                'count': len(following_list)
+            }
+            
+            json_data = json.dumps(network_data, default=str)
+            result = self.client.setex(key, ttl, json_data)
+            
+            self.logger.info(f"Cached {len(following_list)} following accounts for user {user_id}")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Failed to cache following list for user {user_id}: {e}")
+            return False
+    
+    def get_cached_following_list(self, user_id: str) -> Optional[List[Dict]]:
+        """
+        Retrieve cached 1st degree following list
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            List of following users or None if not found/expired
+        """
+        try:
+            key = f"network:{user_id}:following"
+            data = self.client.get(key)
+            
+            if not data:
+                self.logger.debug(f"No cached following list for user {user_id}")
+                return None
+            
+            network_data = json.loads(data)
+            following_list = network_data.get('following_list', [])
+            
+            self.logger.info(f"Retrieved {len(following_list)} cached following accounts for user {user_id}")
+            return following_list
+            
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve cached following list for user {user_id}: {e}")
+            return None
+
+    def cache_network_overlap_analysis(self, user_id: str, overlap_data: Dict, ttl: int = 604800) -> bool:
+        """
+        Cache 2nd degree network overlap analysis
+        
+        Args:
+            user_id: User identifier
+            overlap_data: Dictionary with overlap candidates and scores
+            ttl: Time to live in seconds (default: 1 week)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            key = f"network:{user_id}:2nd_degree"
+            
+            # Store overlap analysis with metadata
+            analysis_data = {
+                'overlap_candidates': overlap_data,
+                'updated_at': datetime.utcnow().isoformat(),
+                'candidate_count': len(overlap_data),
+                'analysis_version': '1.0'
+            }
+            
+            json_data = json.dumps(analysis_data, default=str)
+            result = self.client.setex(key, ttl, json_data)
+            
+            self.logger.info(f"Cached 2nd degree analysis for user {user_id}: {len(overlap_data)} candidates")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Failed to cache 2nd degree analysis for user {user_id}: {e}")
+            return False
+    
+    def get_cached_overlap_analysis(self, user_id: str) -> Optional[Dict]:
+        """
+        Retrieve cached 2nd degree overlap analysis
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Dictionary with overlap candidates or None if not found/expired
+        """
+        try:
+            key = f"network:{user_id}:2nd_degree"
+            data = self.client.get(key)
+            
+            if not data:
+                self.logger.debug(f"No cached 2nd degree analysis for user {user_id}")
+                return None
+            
+            analysis_data = json.loads(data)
+            overlap_candidates = analysis_data.get('overlap_candidates', {})
+            
+            self.logger.info(f"Retrieved cached 2nd degree analysis for user {user_id}: {len(overlap_candidates)} candidates")
+            return overlap_candidates
+            
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve cached 2nd degree analysis for user {user_id}: {e}")
+            return None
+
     def get_stats(self) -> Dict:
         """Get cache statistics"""
         try:
