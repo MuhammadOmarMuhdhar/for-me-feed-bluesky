@@ -1,4 +1,14 @@
-name: Feed Ranking ETL
+name: Feed Ranking ETL (Modular)
+# 
+# Refactored ETL System Architecture:
+# - ETL/ranking/feedOrchestrator.py: Main entry point
+# - ETL/ranking/userData.py: User data processing
+# - ETL/ranking/postCollector.py: Post collection from feeds/networks  
+# - ETL/ranking/rankingEngine.py: BM25 scoring, sentiment analysis
+# - ETL/ranking/networkAnalyzer.py: Network analysis, 2nd degree connections
+# - ETL/ranking/contentFilters.py: FAQ/engagement filtering
+# - ETL/ranking/cacheManager.py: Redis cache operations
+# - ETL/ranking/config.py: Constants and configuration
 
 on:
   workflow_dispatch: # Manual triggering
@@ -22,7 +32,7 @@ env:
 jobs:
   ranking-etl:
     runs-on: ubuntu-latest
-    name: Calculate and Cache Rankings
+    name: Calculate and Cache Rankings (Modular ETL)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,7 +49,8 @@ jobs:
 
       - name: Run Feed Ranking ETL
         run: |
-          python ETL/rankingETL.py --test-mode ${{ github.event.inputs.test_mode || 'false' }}
+          # Using refactored modular ETL system (was ETL/rankingETL.py)
+          python ETL/ranking/feedOrchestrator.py --test-mode ${{ github.event.inputs.test_mode || 'false' }}
 
       - name: Verify Cache Status
         run: |
