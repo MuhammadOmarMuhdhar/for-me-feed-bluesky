@@ -8,7 +8,7 @@ from typing import Dict, List
 from ETL.ranking.config import (
     MIN_2ND_DEGREE_OVERLAP, MAX_2ND_DEGREE_CANDIDATES, POSTS_PER_2ND_DEGREE_ACCOUNT,
     NETWORK_BOOST_FACTOR, Z_SCORE_THRESHOLD, PROFILE_BATCH_SIZE,
-    MIN_FOLLOWING_USERS, FOLLOWING_PERCENTAGE_FALLBACK
+    MIN_FOLLOWING_USERS, FOLLOWING_PERCENTAGE_FALLBACK, DEFAULT_TIME_HOURS
 )
 from ETL.ranking.cacheManager import (
     cache_following_list, get_cached_following_list,
@@ -217,10 +217,10 @@ def collect_2nd_degree_posts(user_did: str, redis_client, posts_limit: int = Non
         
         logger.info(f"Collecting posts from top {len(sorted_candidates)} 2nd degree candidates")
         
-        # Initialize posts client
-        from client.bluesky.userData import Client as UserDataClient
-        user_client = UserDataClient()
-        user_client.login()
+        # Initialize posts client for timeline extraction
+        from client.bluesky.newPosts import Client as BlueskyClient
+        posts_client = BlueskyClient()
+        posts_client.login()
         
         all_2nd_degree_posts = []
         successful_collections = 0
@@ -233,10 +233,13 @@ def collect_2nd_degree_posts(user_did: str, redis_client, posts_limit: int = Non
             overlap_count = candidate_data['overlap_count']
             
             try:
-                # Get recent posts from this 2nd degree account
-                posts = user_client.get_user_posts(
-                    actor=candidate_did,
-                    limit=posts_limit
+                # Create single-user following list and use same timeline method as 1st degree
+                single_user_list = [{'did': candidate_did, 'handle': candidate_handle}]
+                posts = posts_client.get_following_timeline(
+                    following_list=single_user_list,
+                    time_hours=DEFAULT_TIME_HOURS,
+                    include_reposts=True,
+                    repost_weight=0.5
                 )
                 
                 # Tag posts with 2nd degree metadata

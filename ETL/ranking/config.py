@@ -20,7 +20,7 @@ VIRAL_VELOCITY_THRESHOLD = 1.0
 MIN_2ND_DEGREE_OVERLAP = 2
 MAX_2ND_DEGREE_CANDIDATES = 100
 MAX_2ND_DEGREE_CACHE_CANDIDATES = 100  # Only cache most relevant candidates
-POSTS_PER_2ND_DEGREE_ACCOUNT = 100
+POSTS_PER_2ND_DEGREE_ACCOUNT = None  # No limit - collect all posts within time window
 NETWORK_BOOST_FACTOR = 2.5
 Z_SCORE_THRESHOLD = -0.30
 
@@ -67,7 +67,7 @@ FAQ_KEYWORDS: List[str] = [
 ]
 
 # Feed similarity threshold
-FEED_SIMILARITY_THRESHOLD = 0.4
+FEED_SIMILARITY_THRESHOLD = 0.6
 
 # Profile batch size for API calls
 PROFILE_BATCH_SIZE = 25
