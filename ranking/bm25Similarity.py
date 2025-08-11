@@ -176,3 +176,264 @@ def compute_bm25_from_user_data(user_data: Dict, posts_with_text: List[Dict], k1
     # Compute BM25 similarity
     return compute_bm25_similarity(query_terms, posts_with_text, k1, b)
 
+
+def analyze_post_sentiment_and_emotions(text: str) -> Dict:
+    """
+    Analyze post sentiment and emotions for compatibility matching
+    
+    Args:
+        text: Post text to analyze
+        
+    Returns:
+        Dict with sentiment and emotion scores
+    """
+    try:
+        from textblob import TextBlob
+        from nrclex import NRCLex
+        
+        # Sentiment analysis
+        blob = TextBlob(text)
+        sentiment = {
+            'polarity': blob.sentiment.polarity,
+            'subjectivity': blob.sentiment.subjectivity
+        }
+        
+        # Emotion analysis
+        emotion = NRCLex(text)
+        emotions = emotion.raw_emotion_scores
+        
+        # Normalize emotions by text length
+        text_words = len(text.split())
+        normalization_factor = max(1, text_words)
+        
+        normalized_emotions = {
+            'joy': min(1.0, emotions.get('joy', 0) / normalization_factor),
+            'anger': min(1.0, emotions.get('anger', 0) / normalization_factor),
+            'trust': min(1.0, emotions.get('trust', 0) / normalization_factor),
+            'fear': min(1.0, emotions.get('fear', 0) / normalization_factor),
+            'surprise': min(1.0, emotions.get('surprise', 0) / normalization_factor)
+        }
+        
+        return {
+            'sentiment': sentiment,
+            'emotions': normalized_emotions
+        }
+        
+    except Exception as e:
+        print(f"Warning: Post sentiment analysis failed: {e}")
+        # Return neutral values on failure
+        return {
+            'sentiment': {'polarity': 0.0, 'subjectivity': 0.5},
+            'emotions': {'joy': 0.3, 'anger': 0.1, 'trust': 0.5, 'fear': 0.2, 'surprise': 0.3}
+        }
+
+
+def calculate_sentiment_compatibility_multiplier(post_analysis: Dict, user_sentiment_context: Dict, matched_keywords: List[str]) -> float:
+    """
+    Calculate sentiment compatibility multiplier for enhanced BM25 scoring
+    
+    Args:
+        post_analysis: Post's sentiment/emotion analysis
+        user_sentiment_context: User's sentiment preferences per keyword
+        matched_keywords: Keywords that matched between user and post
+        
+    Returns:
+        Multiplier for BM25 score (0.5 to 1.5 range)
+    """
+    try:
+        if not matched_keywords or not user_sentiment_context:
+            return 1.0  # Neutral multiplier
+        
+        post_sentiment = post_analysis['sentiment']
+        post_emotions = post_analysis['emotions']
+        
+        total_compatibility = 0.0
+        keyword_count = 0
+        
+        # Calculate compatibility for each matched keyword
+        for keyword in matched_keywords:
+            if keyword in user_sentiment_context:
+                user_data = user_sentiment_context[keyword]
+                user_sentiment = user_data['sentiment']
+                user_emotions = user_data['emotions']
+                
+                # Sentiment compatibility (weight: 40%)
+                sentiment_diff = abs(post_sentiment['polarity'] - user_sentiment['avg_polarity'])
+                sentiment_compatibility = max(0.0, 1.0 - sentiment_diff)  # 1.0 = perfect match, 0.0 = opposite
+                
+                # Emotion compatibility (weight: 30%)  
+                emotion_compatibility = 0.0
+                for emotion_type in ['joy', 'anger', 'trust', 'fear', 'surprise']:
+                    post_emotion = post_emotions.get(emotion_type, 0.0)
+                    user_emotion = user_emotions.get(emotion_type, 0.0)
+                    emotion_diff = abs(post_emotion - user_emotion)
+                    emotion_compatibility += max(0.0, 1.0 - emotion_diff)
+                emotion_compatibility /= 5  # Average across emotions
+                
+                # Subjectivity alignment (weight: 30%)
+                subjectivity_diff = abs(post_sentiment['subjectivity'] - user_sentiment['avg_subjectivity'])
+                subjectivity_compatibility = max(0.0, 1.0 - subjectivity_diff)
+                
+                # Weighted combination
+                keyword_compatibility = (
+                    sentiment_compatibility * 0.4 +
+                    emotion_compatibility * 0.3 +
+                    subjectivity_compatibility * 0.3
+                )
+                
+                total_compatibility += keyword_compatibility
+                keyword_count += 1
+        
+        if keyword_count == 0:
+            return 1.0
+        
+        # Average compatibility across matched keywords
+        avg_compatibility = total_compatibility / keyword_count
+        
+        # Convert to multiplier: 0.0 compatibility → 0.6x, 1.0 compatibility → 1.4x
+        multiplier = 0.6 + (avg_compatibility * 0.8)
+        
+        return max(0.5, min(1.5, multiplier))  # Clamp to reasonable bounds
+        
+    except Exception as e:
+        print(f"Warning: Sentiment compatibility calculation failed: {e}")
+        return 1.0  # Neutral multiplier on error
+
+
+def calculate_reading_level_multiplier(post_text: str, user_reading_level: int) -> float:
+    """
+    Calculate reading level compatibility multiplier
+    
+    Args:
+        post_text: Post text to analyze
+        user_reading_level: User's preferred reading level (1-20 scale)
+        
+    Returns:
+        Multiplier for BM25 score (0.7 to 1.0 range)
+    """
+    try:
+        import textstat
+        
+        # Calculate post reading level
+        post_reading_level = textstat.flesch_kincaid_grade(post_text)
+        
+        # Ensure reasonable bounds
+        post_reading_level = max(1, min(20, post_reading_level))
+        
+        # Calculate difference
+        level_diff = abs(post_reading_level - user_reading_level)
+        
+        # Apply penalty for large differences
+        if level_diff <= 1:
+            return 1.0      # Perfect/close match
+        elif level_diff <= 2:
+            return 0.95     # Minor penalty
+        elif level_diff <= 3:
+            return 0.9      # Moderate penalty
+        else:
+            return 0.8      # Significant penalty
+            
+    except Exception as e:
+        print(f"Warning: Reading level calculation failed: {e}")
+        return 1.0  # No penalty on error
+
+
+def compute_enhanced_bm25_similarity(
+    user_query_terms: List[str], 
+    posts_with_text: List[Dict], 
+    user_sentiment_context: Dict = None, 
+    user_reading_level: int = 8,
+    k1: float = 1.2, 
+    b: float = 0.75
+) -> List[Dict]:
+    """
+    Enhanced BM25 similarity with sentiment compatibility and reading level filtering
+    
+    Args:
+        user_query_terms: List of terms representing user's interests
+        posts_with_text: Posts with text content
+        user_sentiment_context: User's sentiment/emotion preferences per keyword
+        user_reading_level: User's preferred reading level (1-20)
+        k1: BM25 parameter controlling term frequency saturation
+        b: BM25 parameter controlling document length normalization
+        
+    Returns:
+        Posts with enhanced_bm25_score field added
+    """
+    print(f"Computing Enhanced BM25 similarity for {len(posts_with_text)} posts with sentiment analysis...")
+    
+    # First compute standard BM25 scores
+    posts_with_bm25 = compute_bm25_similarity(user_query_terms, posts_with_text, k1, b)
+    
+    if not user_sentiment_context:
+        print("No sentiment context provided, using basic BM25 scores")
+        for post in posts_with_bm25:
+            post['enhanced_bm25_score'] = post.get('bm25_score', 0.0)
+            post['sentiment_multiplier'] = 1.0
+            post['reading_level_multiplier'] = 1.0
+        return posts_with_bm25
+    
+    # Extract unique keywords from query terms for matching
+    unique_query_terms = list(set(user_query_terms))
+    
+    enhanced_posts = []
+    sentiment_analysis_count = 0
+    
+    for post in posts_with_bm25:
+        text = post.get('text', '')
+        base_bm25_score = post.get('bm25_score', 0.0)
+        
+        if not text or base_bm25_score == 0:
+            post['enhanced_bm25_score'] = base_bm25_score
+            post['sentiment_multiplier'] = 1.0
+            post['reading_level_multiplier'] = 1.0
+            enhanced_posts.append(post)
+            continue
+        
+        # Analyze post sentiment and emotions
+        post_analysis = analyze_post_sentiment_and_emotions(text)
+        sentiment_analysis_count += 1
+        
+        # Find keywords that appear in this post
+        text_lower = text.lower()
+        matched_keywords = [term for term in unique_query_terms if term.lower() in text_lower]
+        
+        # Calculate sentiment compatibility multiplier
+        sentiment_multiplier = calculate_sentiment_compatibility_multiplier(
+            post_analysis, user_sentiment_context, matched_keywords
+        )
+        
+        # Calculate reading level compatibility multiplier
+        reading_level_multiplier = calculate_reading_level_multiplier(text, user_reading_level)
+        
+        # Calculate enhanced score
+        enhanced_score = base_bm25_score * sentiment_multiplier * reading_level_multiplier
+        
+        # Store analysis results
+        post['enhanced_bm25_score'] = float(enhanced_score)
+        post['base_bm25_score'] = float(base_bm25_score)
+        post['sentiment_multiplier'] = float(sentiment_multiplier)
+        post['reading_level_multiplier'] = float(reading_level_multiplier)
+        post['matched_keywords'] = matched_keywords
+        post['post_sentiment_analysis'] = post_analysis
+        
+        enhanced_posts.append(post)
+    
+    # Log enhancement statistics
+    if sentiment_analysis_count > 0:
+        sentiment_multipliers = [p.get('sentiment_multiplier', 1.0) for p in enhanced_posts if p.get('sentiment_multiplier')]
+        reading_multipliers = [p.get('reading_level_multiplier', 1.0) for p in enhanced_posts if p.get('reading_level_multiplier')]
+        
+        avg_sentiment_mult = sum(sentiment_multipliers) / len(sentiment_multipliers) if sentiment_multipliers else 1.0
+        avg_reading_mult = sum(reading_multipliers) / len(reading_multipliers) if reading_multipliers else 1.0
+        
+        boosted_posts = len([m for m in sentiment_multipliers if m > 1.05])
+        penalized_posts = len([m for m in sentiment_multipliers if m < 0.95])
+        
+        print(f"Enhanced BM25 complete: analyzed {sentiment_analysis_count} posts")
+        print(f"Average sentiment multiplier: {avg_sentiment_mult:.3f}")
+        print(f"Average reading level multiplier: {avg_reading_mult:.3f}")
+        print(f"Posts boosted by sentiment: {boosted_posts}, Posts penalized: {penalized_posts}")
+    
+    return enhanced_posts
+
