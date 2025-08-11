@@ -28,6 +28,10 @@ Z_SCORE_THRESHOLD = -0.30
 FOLLOWING_LIST_CACHE_TTL = 86400  # 24 hours
 NETWORK_OVERLAP_CACHE_TTL = 604800  # 1 week
 
+# API rate limiting controls
+ANALYSIS_API_DELAY_SECONDS = 3.5  # Delay between API calls during 2nd degree analysis
+MAX_FOLLOWS_PER_USER_ANALYSIS = 1000  # Limit follows fetched per user during analysis
+
 # Scoring weights and multipliers
 REPOST_WEIGHT = 2.0
 REPLY_WEIGHT = 0.5

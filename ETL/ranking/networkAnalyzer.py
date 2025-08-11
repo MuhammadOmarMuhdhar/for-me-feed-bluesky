@@ -3,12 +3,14 @@ Network analysis functions for the ranking ETL system.
 """
 import logging
 import numpy as np
+import time
 from typing import Dict, List
 
 from ETL.ranking.config import (
     MIN_2ND_DEGREE_OVERLAP, MAX_2ND_DEGREE_CANDIDATES, POSTS_PER_2ND_DEGREE_ACCOUNT,
     NETWORK_BOOST_FACTOR, Z_SCORE_THRESHOLD, PROFILE_BATCH_SIZE,
-    MIN_FOLLOWING_USERS, FOLLOWING_PERCENTAGE_FALLBACK, DEFAULT_TIME_HOURS
+    MIN_FOLLOWING_USERS, FOLLOWING_PERCENTAGE_FALLBACK, DEFAULT_TIME_HOURS,
+    ANALYSIS_API_DELAY_SECONDS, MAX_FOLLOWS_PER_USER_ANALYSIS
 )
 from ETL.ranking.cacheManager import (
     cache_following_list, get_cached_following_list,
@@ -85,6 +87,47 @@ def fetch_following_list_temporary(user_did: str) -> List[Dict]:
         return []
 
 
+def get_mutual_connections(user_did: str, following_list: List[Dict]) -> List[Dict]:
+    """
+    Get mutual connections (users who follow each other) from the following list
+    
+    Args:
+        user_did: User's DID
+        following_list: List of users they follow
+        
+    Returns:
+        List of mutual connections (users who follow back)
+    """
+    try:
+        from client.bluesky.userData import Client as UserDataClient
+        user_client = UserDataClient()
+        user_client.login()
+        
+        # Get user's followers
+        logger.info(f"Fetching followers list for mutual connection analysis...")
+        followers_list = user_client.get_all_user_followers(user_did)
+        
+        if not followers_list:
+            logger.warning(f"No followers found for {user_did}")
+            return []
+        
+        # Create set of follower DIDs for fast lookup
+        followers_dids = {follower.get('did') for follower in followers_list}
+        
+        # Find mutual connections
+        mutual_connections = [
+            user for user in following_list 
+            if user.get('did') in followers_dids
+        ]
+        
+        logger.info(f"Found {len(mutual_connections)} mutual connections from {len(following_list)} following")
+        return mutual_connections
+        
+    except Exception as e:
+        logger.error(f"Failed to get mutual connections for {user_did}: {e}")
+        return []
+
+
 def calculate_2nd_degree_overlap(user_did: str, redis_client, min_overlap: int = None) -> Dict:
     """
     Calculate 2nd degree network overlap by analyzing who each 1st degree connection follows
@@ -117,12 +160,24 @@ def calculate_2nd_degree_overlap(user_did: str, redis_client, min_overlap: int =
             logger.warning(f"No 1st degree network found for {user_did}")
             return {}
         
+        # Get mutual connections (users who follow each other)
+        mutual_connections = get_mutual_connections(user_did, first_degree)
+        
+        if not mutual_connections:
+            logger.warning(f"No mutual connections found for {user_did}")
+            return {}
+        
+        logger.info(f"Analyzing {len(mutual_connections)} mutual connections (filtered from {len(first_degree)} total)")
+        
+        # Use mutual connections instead of all first degree connections
+        connections_to_analyze = mutual_connections
+        
         # Track overlap candidates
         overlap_candidates = {}
         processed_count = 0
         
-        # For each 1st degree connection, get who they follow
-        for followed_user in first_degree:
+        # For each mutual connection, get who they follow
+        for followed_user in connections_to_analyze:
             followed_did = followed_user.get('did')
             followed_handle = followed_user.get('handle', 'unknown')
             
@@ -130,8 +185,17 @@ def calculate_2nd_degree_overlap(user_did: str, redis_client, min_overlap: int =
                 continue
                 
             try:
-                # Get who this 1st degree connection follows (their 2nd degree candidates) - temporary fetch without caching
+                # Add delay to prevent rate limiting
+                if processed_count > 0:
+                    time.sleep(ANALYSIS_API_DELAY_SECONDS)
+                
+                # Get who this mutual connection follows (their 2nd degree candidates) - temporary fetch without caching
                 their_following = fetch_following_list_temporary(followed_did)
+                
+                # Limit follows per user if configured
+                if MAX_FOLLOWS_PER_USER_ANALYSIS and len(their_following) > MAX_FOLLOWS_PER_USER_ANALYSIS:
+                    their_following = their_following[:MAX_FOLLOWS_PER_USER_ANALYSIS]
+                    logger.debug(f"Limited {followed_handle} following list to {MAX_FOLLOWS_PER_USER_ANALYSIS} users")
                 
                 # Count overlaps
                 for candidate in their_following:
@@ -153,7 +217,7 @@ def calculate_2nd_degree_overlap(user_did: str, redis_client, min_overlap: int =
                     overlap_candidates[candidate_did]['followed_by'].append(followed_handle)
                 
                 processed_count += 1
-                logger.info(f"Processed {processed_count}/{len(first_degree)}: {followed_handle} follows {len(their_following)} accounts")
+                logger.info(f"Processed {processed_count}/{len(connections_to_analyze)}: {followed_handle} follows {len(their_following)} accounts")
                 
             except Exception as e:
                 logger.warning(f"Failed to get following list for {followed_handle}: {e}")

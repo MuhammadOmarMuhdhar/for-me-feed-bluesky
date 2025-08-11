@@ -742,6 +742,115 @@ class Client:
         
         return follows
     
+    def get_user_followers(
+        self,
+        actor: str = None,
+        limit: int = 100,
+        cursor: str = None
+    ) -> List[Dict]:
+        """
+        Get list of users that follow the specified user
+        
+        Args:
+            actor: User handle or DID (defaults to authenticated user)
+            limit: Number of followers to fetch (max 100 per request)
+            cursor: Pagination cursor
+            
+        Returns:
+            List of followers with metadata
+        """
+        if not self.authenticated:
+            raise Exception("Must login first. Call client.login(identifier, password)")
+        
+        if not actor:
+            actor = self.client.me.handle
+        
+        try:
+            params = {
+                'actor': actor,
+                'limit': limit
+            }
+            if cursor:
+                params['cursor'] = cursor
+                
+            response = self.client.app.bsky.graph.get_followers(params)
+            
+            followers = []
+            for follower in response.followers:
+                follower_data = {
+                    'did': follower.did,
+                    'handle': follower.handle,
+                    'display_name': getattr(follower, 'display_name', ''),
+                    'description': getattr(follower, 'description', ''),
+                    'follower_count': getattr(follower, 'follower_count', 0),
+                    'follows_count': getattr(follower, 'follows_count', 0),
+                    'posts_count': getattr(follower, 'posts_count', 0),
+                    'indexed_at': getattr(follower, 'indexed_at', None),
+                    'created_at': getattr(follower, 'created_at', None)
+                }
+                followers.append(follower_data)
+            
+            # Return both followers and cursor for pagination
+            next_cursor = getattr(response, 'cursor', None)
+            return followers, next_cursor
+            
+        except Exception as e:
+            print(f"Error fetching followers: {e}")
+            return [], None
+    
+    def get_all_user_followers(
+        self,
+        actor: str = None,
+        max_followers: int = None
+    ) -> List[Dict]:
+        """
+        Get all users that follow the specified user with pagination
+        
+        Args:
+            actor: User handle or DID (defaults to authenticated user)
+            max_followers: Maximum number of followers to fetch (None = no limit)
+            
+        Returns:
+            Complete list of followers
+        """
+        if not self.authenticated:
+            raise Exception("Must login first. Call client.login(identifier, password)")
+        
+        if not actor:
+            actor = self.client.me.handle
+        
+        all_followers = []
+        cursor = None
+        
+        print(f"Fetching followers list for {actor}...")
+        
+        while True:
+            # No limit if max_followers is None, otherwise limit remaining
+            if max_followers is None:
+                batch_limit = 100  # API max per request
+            else:
+                if len(all_followers) >= max_followers:
+                    break
+                batch_limit = min(100, max_followers - len(all_followers))
+            
+            followers_batch, next_cursor = self.get_user_followers(actor, limit=batch_limit, cursor=cursor)
+            
+            if not followers_batch:
+                break
+            
+            all_followers.extend(followers_batch)
+            print(f"   Fetched {len(followers_batch)} followers (total: {len(all_followers)})")
+            
+            # If no more cursor, we've reached the end
+            if not next_cursor:
+                break
+                
+            # Update cursor for next iteration
+            cursor = next_cursor
+        
+        print(f"Retrieved {len(all_followers)} total followers for {actor}")
+        return all_followers
+
     def get_profiles(
         self,
         actors: List[str]
