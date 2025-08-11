@@ -146,6 +146,24 @@ def calculate_rankings_with_feed_boosting(
         if len(filtered_posts) < len(posts):
             logger.info(f"Moderation filtering: {len(posts)} -> {len(filtered_posts)} posts")
         
+        # Deduplicate posts by URI (simple cross-source deduplication)
+        seen_uris = set()
+        deduplicated_posts = []
+        duplicate_count = 0
+        
+        for post in filtered_posts:
+            uri = post.get('post_uri') or post.get('uri', '')
+            if uri and uri not in seen_uris:
+                seen_uris.add(uri)
+                deduplicated_posts.append(post)
+            elif uri:
+                duplicate_count += 1
+        
+        if duplicate_count > 0:
+            logger.info(f"Deduplication: removed {duplicate_count} duplicate posts from {len(filtered_posts)} posts")
+        
+        filtered_posts = deduplicated_posts
+        
         # Use enhanced BM25 if sentiment context is available, otherwise fall back to basic BM25
         if user_sentiment_context:
             logger.info("Using enhanced BM25 with sentiment analysis")
