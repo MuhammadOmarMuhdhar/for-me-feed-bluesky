@@ -1,0 +1,46 @@
+{
+  "enhanced_keywords_experiment": {
+    "enabled": true,
+    "description": "Enhanced keywords with sentiment analysis vs basic keyword matching",
+    "default_group": "enhanced",
+    "groups": {
+      "enhanced": {
+        "percentage": 100,
+        "description": "Enhanced keywords with sentiment and emotion analysis"
+      },
+      "basic": {
+        "percentage": 0,
+        "description": "Basic keyword matching without sentiment analysis"
+      }
+    },
+    "start_date": "2025-08-06",
+    "end_date": null,
+    "metrics_to_track": [
+      "user_engagement_time",
+      "posts_consumed", 
+      "session_length",
+      "click_through_rate"
+    ]
+  },
+  "reading_level_experiment": {
+    "enabled": false,
+    "description": "Reading level filtering experiment",
+    "default_group": "control",
+    "groups": {
+      "control": {
+        "percentage": 100,
+        "description": "No reading level filtering"
+      },
+      "filtered": {
+        "percentage": 0,
+        "description": "Apply reading level filtering"
+      }
+    },
+    "start_date": null,
+    "end_date": null,
+    "metrics_to_track": [
+      "user_retention",
+      "posts_consumed"
+    ]
+  }
+}
